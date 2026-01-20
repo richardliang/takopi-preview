@@ -1134,9 +1134,11 @@ def _persist_state(config: PreviewConfig, sessions: list[PreviewSession]) -> Non
 def _format_started(session: PreviewSession) -> str:
     url = session.url or "(url unavailable)"
     context = f"\n{session.context_line}" if session.context_line else ""
+    dev_line = "Dev server: started" if session.owns_dev_process else "Dev server: external"
     return (
-        f"Preview started on port {session.port}.\n"
-        f"URL: {url}{context}\n"
+        f"Tailscale preview enabled on port {session.port}.\n"
+        f"{dev_line}\n"
+        f"Open: {url}{context}\n"
         f"ID: {session.session_id}"
     )
 
