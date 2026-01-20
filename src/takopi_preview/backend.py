@@ -8,7 +8,7 @@ import signal
 import socket
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +19,6 @@ from takopi.api import (
     ConfigError,
     HOME_CONFIG_PATH,
     get_logger,
-    read_config,
 )
 from takopi.utils.json_state import atomic_write_json
 
@@ -403,7 +402,13 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port = _parse_port(_arg(ctx.args, 1)) or config.default_port
+            port, dev_command, auto_start = _parse_start_args(ctx.args[1:], config)
+            if dev_command is not None or auto_start is not None:
+                config = _override_config(
+                    config,
+                    dev_command=dev_command,
+                    auto_start=auto_start,
+                )
             session = await MANAGER.start(
                 config=config,
                 port=port,
@@ -451,22 +456,53 @@ def _load_config(ctx: CommandContext, context: object | None) -> PreviewConfig:
     base = dict(ctx.plugin_config or {})
     project_override: dict[str, Any] = {}
     config_path = ctx.config_path or HOME_CONFIG_PATH
-    if context is not None and _context_project(context) and config_path.exists():
-        try:
-            raw = read_config(config_path)
-        except ConfigError as exc:
-            logger.warning("preview.config_read_failed", error=str(exc))
-        else:
-            projects = raw.get("projects")
-            if isinstance(projects, dict):
-                project_cfg = projects.get(_context_project(context))
-                if isinstance(project_cfg, dict):
-                    preview_cfg = project_cfg.get("preview")
-                    if isinstance(preview_cfg, dict):
-                        project_override = preview_cfg
+    if context is not None:
+        project = _context_project(context)
+        if project:
+            project_override = _project_override(base, project, config_path=config_path)
 
-    merged = {**base, **project_override}
+    merged = _merge_preview_config(base, project_override)
     return PreviewConfig.from_config(merged, config_path=config_path)
+
+
+def _project_override(
+    config: dict[str, Any],
+    project: str,
+    *,
+    config_path: Path,
+) -> dict[str, Any]:
+    overrides = config.get("projects")
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ConfigError(
+            f"Invalid `plugins.preview.projects` in {config_path}; expected a table."
+        )
+    raw = overrides.get(project)
+    if raw is None:
+        raw = overrides.get(project.lower())
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"Invalid `plugins.preview.projects.{project}` in {config_path}; "
+            "expected a table."
+        )
+    return dict(raw)
+
+
+def _merge_preview_config(
+    base: dict[str, Any], override: dict[str, Any]
+) -> dict[str, Any]:
+    if not override:
+        return base
+    merged = dict(base)
+    merged.update(override)
+    base_env = base.get("env")
+    override_env = override.get("env")
+    if isinstance(base_env, dict) and isinstance(override_env, dict):
+        merged["env"] = {**base_env, **override_env}
+    return merged
 
 
 def _optional_str(config: dict[str, Any], key: str, *, config_path: Path) -> str | None:
@@ -582,6 +618,92 @@ def _parse_port(arg: str | None) -> int | None:
         if tail.isdigit():
             return int(tail)
     return None
+
+
+def _parse_start_args(
+    args: tuple[str, ...],
+    config: PreviewConfig,
+) -> tuple[int, str | None, bool | None]:
+    port: int | None = None
+    dev_command: str | None = None
+    auto_start: bool | None = None
+    idx = 0
+
+    while idx < len(args):
+        token = args[idx]
+        if token == "--":
+            if idx + 1 >= len(args):
+                raise ConfigError("preview start requires a command after `--`")
+            dev_command = " ".join(args[idx + 1 :]).strip()
+            if not dev_command:
+                raise ConfigError("preview start requires a non-empty command after `--`")
+            auto_start = True
+            break
+        key, value = _split_flag(token)
+        if key in {"--dev", "--dev-command", "--cmd"}:
+            if value is None:
+                idx += 1
+                if idx >= len(args):
+                    raise ConfigError("preview start requires a value after --dev-command")
+                value = args[idx]
+            dev_command = value.strip()
+            if not dev_command:
+                raise ConfigError("preview start requires a non-empty --dev-command")
+            auto_start = True
+            idx += 1
+            continue
+        if key == "--port":
+            if value is None:
+                idx += 1
+                if idx >= len(args):
+                    raise ConfigError("preview start requires a value after --port")
+                value = args[idx]
+            parsed = _parse_port(value)
+            if parsed is None:
+                raise ConfigError(f"Invalid port {value!r}.")
+            port = parsed
+            idx += 1
+            continue
+        if key in {"--no-start", "--manual"}:
+            auto_start = False
+            idx += 1
+            continue
+        if key.startswith("--"):
+            raise ConfigError(f"Unknown flag {key!r}.")
+        if port is None:
+            parsed = _parse_port(token)
+            if parsed is not None:
+                port = parsed
+                idx += 1
+                continue
+        raise ConfigError(f"Unexpected argument {token!r}.")
+
+    if port is None:
+        port = config.default_port
+    return port, dev_command, auto_start
+
+
+def _split_flag(token: str) -> tuple[str, str | None]:
+    if "=" in token:
+        key, value = token.split("=", 1)
+        return key, value
+    return token, None
+
+
+def _override_config(
+    config: PreviewConfig,
+    *,
+    dev_command: str | None,
+    auto_start: bool | None,
+) -> PreviewConfig:
+    updates: dict[str, Any] = {}
+    if dev_command is not None:
+        updates["dev_command"] = dev_command
+    if auto_start is not None:
+        updates["auto_start"] = auto_start
+    if not updates:
+        return config
+    return replace(config, **updates)
 
 
 def _is_port_available(host: str, port: int) -> bool:
@@ -1006,7 +1128,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start [port]\n"
+        "/preview start [port] [--dev <command> | -- <command>]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"
