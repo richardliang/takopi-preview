@@ -1,40 +1,136 @@
-# takopi-tailscale
+# takopi-preview
 
-Lightweight Tailscale preview command plugin for Takopi.
+tailscale-backed preview command plugin for takopi. starts a dev server (optional),
+exposes it inside your tailnet via `tailscale serve`, and tracks preview sessions
+by project/worktree context.
 
-## Install
+published as the `takopi-preview` package. the command id is `preview`.
+
+## features
+
+- `/preview` commands to start, list, stop, and clean up previews
+- tailnet-only urls (no public ingress) with `tailscale serve`
+- per-project overrides for ports and dev commands
+- optional dev server auto-start with `{port}` substitution
+- session registry with ttl expiration and state recovery
+- allowlist support for sensitive commands (like `killall`)
+
+## requirements
+
+- python 3.14+
+- takopi >= 0.20
+- tailscale installed and authenticated on the host (`tailscale up`)
+- dev server binds to 127.0.0.1 (tailscale proxies locally)
+- security groups should not expose the dev server port publicly
+
+## install
+
+install into the same environment as takopi.
 
 ```sh
-uv pip install takopi-tailscale
+uv tool install -U takopi
+uv tool install -U takopi --with takopi-transport-slack --with takopi-preview
 ```
 
-## Configure
+or, with a virtualenv:
+
+```sh
+pip install takopi-transport-slack takopi-preview
+```
+
+## setup
+
+1. install tailscale on the host and authenticate it (`tailscale up`).
+2. ensure magicdns is enabled so `DEVICE.TAILNET.ts.net` resolves.
+3. run takopi with your transport (slack or telegram) as usual.
+
+## configuration
+
+add to `~/.takopi/takopi.toml`:
 
 ```toml
 [plugins]
-enabled = ["takopi-transport-slack", "takopi-tailscale"]
+enabled = ["takopi-transport-slack", "takopi-preview"]
 
 [plugins.preview]
 provider = "tailscale"
 default_port = 3000
 dev_command = "pnpm dev -- --host 127.0.0.1 --port {port}"
 auto_start = true
+ttl_minutes = 120
 allowed_user_ids = [123456789]
 
-[projects.zkp2p-mobile.preview]
-port = 8081
-dev_command = "pnpm react-native start --port {port}"
+# optional env injection for the dev server
+[plugins.preview.env]
+NODE_ENV = "development"
+
+# advanced overrides
+tailscale_bin = "tailscale"
+local_host = "127.0.0.1"
+
+[projects.myapp.preview]
+port = 5173
+dev_command = "npm run dev -- --host 127.0.0.1 --port {port}"
 ```
 
-## Commands
+notes:
 
-- `/preview start [port]`
-- `/preview list`
-- `/preview stop [port]`
-- `/preview killall`
-- `/preview help`
+- `dev_command` may include `{port}`; it will be substituted at runtime.
+- set `auto_start = false` if you start your dev server manually.
+- `ttl_minutes = 0` disables expiration.
+- empty `allowed_user_ids` means no allowlist enforcement.
 
-## Notes
+## commands
 
-- Uses `tailscale serve --tcp` to expose `tcp://127.0.0.1:<port>` inside the tailnet.
-- URLs are tailnet-only: `http://DEVICE.TAILNET.ts.net:<port>`.
+- `/preview start [port]`: start a preview for the current context
+- `/preview list`: show active previews (url, port, uptime, context)
+- `/preview stop [id|port]`: stop a preview (defaults to current context)
+- `/preview killall`: stop all previews (restricted by allowlist)
+- `/preview help`: usage help
+
+## workflow
+
+1. choose a context: `/myapp @feat/login` or reply in an existing thread.
+2. run `/preview start` (or `/preview start 5173`).
+3. open the returned url, for example:
+
+```
+https://DEVICE.TAILNET.ts.net/preview/5173
+```
+
+4. stop when done: `/preview stop` or `/preview stop 5173`.
+
+## state and ttl
+
+sessions are stored in memory and persisted to:
+
+- `~/.takopi/state/preview.json`
+
+dev server logs (when auto-started) are written to:
+
+- `~/.takopi/state/preview-logs/<session>.log`
+
+`ttl_minutes` controls automatic expiration; expired sessions are cleaned up
+on the next command invocation.
+
+## errors
+
+- missing tailscale: follow the install docs and run `tailscale up`.
+- port already in use: run `/preview list` or pick a new port.
+- dev server failures: the error includes log tail + log path.
+
+## spec alignment
+
+this implementation follows the webapp preview workflow spec:
+
+- [x] command surface: start/list/stop/killall/help
+- [x] config in `[plugins.preview]` with per-project overrides
+- [x] tailscale serve + dns from `tailscale status --json`
+- [x] tailnet-only https urls
+- [x] in-memory registry + state file under `~/.takopi/state/preview.json`
+- [x] ttl-based expiration (`ttl_minutes`)
+- [x] allowlist enforcement via `allowed_user_ids`
+
+## license
+
+mit
