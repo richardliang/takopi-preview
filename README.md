@@ -79,6 +79,7 @@ notes:
 - `dev_command` may include `{port}`; it will be substituted at runtime.
 - `dev_command` is required when `auto_start = true`. set `auto_start = false` to manage the dev server yourself.
 - Inline `--dev`/`--` overrides enable auto-start for that run; use `--no-start` to force manual mode.
+- To require an explicit command each run, omit `dev_command` and set `auto_start = false`, then pass `--dev` or `--`.
 - `ttl_minutes = 0` disables expiration.
 - empty `allowed_user_ids` means no allowlist enforcement.
 
