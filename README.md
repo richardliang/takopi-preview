@@ -96,6 +96,7 @@ notes:
 ## workflow
 
 1. choose a context: `/myapp @feat/login` or reply in an existing thread.
+   previews only run in worktrees, so include a branch to create/use one.
 2. run `/preview start` (or `/preview start 5173`).
 3. open the returned url, for example:
 
@@ -117,12 +118,15 @@ dev server logs (when auto-started) are written to:
 
 `ttl_minutes` controls automatic expiration; expired sessions are cleaned up
 on the next command invocation.
+worktrees that are pruned or deleted are also cleaned up on the next command.
+takopi shutdown stops all previews and clears state, so sessions do not persist.
 
 ## errors
 
 - missing tailscale: follow the install docs and run `tailscale up`.
 - serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
 - port already in use: run `/preview list` or pick a new port.
+- not in a worktree: include a branch (ex: `/myapp @feat/foo`) to create/use a worktree.
 - dev server failures: the error includes log tail + log path.
 
 ## spec alignment

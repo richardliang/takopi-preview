@@ -20,6 +20,7 @@ from takopi.api import (
     HOME_CONFIG_PATH,
     get_logger,
 )
+from takopi.utils.git import git_stdout, resolve_main_worktree_root
 from takopi.utils.json_state import atomic_write_json
 
 logger = get_logger(__name__)
@@ -137,6 +138,8 @@ class PreviewSession:
     dev_pid: int | None
     tunnel_pid: int | None
     owns_dev_process: bool
+    worktree_path: Path | None = None
+    repo_root: Path | None = None
     dev_process: subprocess.Popen[str] | None = None
     log_path: Path | None = None
 
@@ -157,6 +160,8 @@ class PreviewSession:
             "dev_pid": self.dev_pid,
             "tunnel_pid": self.tunnel_pid,
             "owns_dev_process": self.owns_dev_process,
+            "worktree_path": str(self.worktree_path) if self.worktree_path else None,
+            "repo_root": str(self.repo_root) if self.repo_root else None,
             "log_path": str(self.log_path) if self.log_path else None,
         }
 
@@ -215,6 +220,8 @@ class PreviewManager:
         context_line: str | None,
         context: object | None,
         cwd: Path | None,
+        worktree_path: Path | None,
+        repo_root: Path | None,
     ) -> PreviewSession:
         await self.ensure_loaded(config)
 
@@ -275,6 +282,8 @@ class PreviewManager:
             dev_pid=dev_process.pid if dev_process is not None else None,
             tunnel_pid=None,
             owns_dev_process=owns_dev_process,
+            worktree_path=worktree_path,
+            repo_root=repo_root,
             dev_process=dev_process,
             log_path=log_path,
         )
@@ -382,6 +391,33 @@ class PreviewManager:
             _stop_session(config=config, session=session)
         _persist_state(config, [])
 
+    async def expire_pruned(self, config: PreviewConfig) -> list[PreviewSession]:
+        await self.ensure_loaded(config)
+
+        async with self._lock:
+            sessions = list(self._sessions.values())
+
+        if not sessions:
+            return []
+
+        pruned = await asyncio.to_thread(_find_pruned_sessions, sessions)
+        if not pruned:
+            return []
+
+        async with self._lock:
+            for session in pruned:
+                self._sessions.pop(session.port, None)
+
+        for session in pruned:
+            await asyncio.to_thread(
+                _stop_session,
+                config=config,
+                session=session,
+            )
+
+        await self._persist_state(config)
+        return pruned
+
 
 MANAGER = PreviewManager()
 
@@ -415,6 +451,7 @@ class PreviewCommand:
 
         await MANAGER.ensure_expiry_loop(config)
         await MANAGER.expire_stale(config)
+        await MANAGER.expire_pruned(config)
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
@@ -425,12 +462,15 @@ class PreviewCommand:
                     dev_command=dev_command,
                     auto_start=auto_start,
                 )
+            worktree_path, repo_root = _require_worktree(cwd)
             session = await MANAGER.start(
                 config=config,
                 port=port,
                 context_line=context_line,
                 context=context,
                 cwd=cwd,
+                worktree_path=worktree_path,
+                repo_root=repo_root,
             )
             dev_status = _describe_dev_status(session=session, config=config)
             return CommandResult(text=_format_started(session, dev_status=dev_status))
@@ -585,6 +625,12 @@ def _coerce_int(value: Any) -> int | None:
     return None
 
 
+def _coerce_path(value: Any) -> Path | None:
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
+
+
 def _optional_env(
     config: dict[str, Any], key: str, *, config_path: Path
 ) -> dict[str, str]:
@@ -623,6 +669,24 @@ def _validate_port(port: int) -> None:
         raise ConfigError(
             f"Port {port} is out of range ({SAFE_PORT_MIN}-{SAFE_PORT_MAX})."
         )
+
+
+def _require_worktree(cwd: Path | None) -> tuple[Path, Path]:
+    if cwd is None:
+        raise ConfigError("preview start requires a worktree; specify a project/branch.")
+    top = git_stdout(
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
+    )
+    if not top:
+        raise ConfigError("preview start requires a git worktree.")
+    worktree_path = Path(top).resolve(strict=False)
+    repo_root = resolve_main_worktree_root(worktree_path)
+    if repo_root is None:
+        raise ConfigError("preview start requires a git worktree.")
+    repo_root = repo_root.resolve(strict=False)
+    if worktree_path == repo_root:
+        raise ConfigError("preview start requires a worktree (not the main repo).")
+    return worktree_path, repo_root
 
 
 def _parse_port(arg: str | None) -> int | None:
@@ -1095,6 +1159,8 @@ def _parse_state_session(payload: Any) -> PreviewSession | None:
     dev_pid = _coerce_int(payload.get("dev_pid"))
     tunnel_pid = _coerce_int(payload.get("tunnel_pid"))
     owns_dev_process = bool(payload.get("owns_dev_process", False))
+    worktree_path = _coerce_path(payload.get("worktree_path"))
+    repo_root = _coerce_path(payload.get("repo_root"))
 
     log_path = payload.get("log_path")
     if isinstance(log_path, str) and log_path:
@@ -1115,6 +1181,8 @@ def _parse_state_session(payload: Any) -> PreviewSession | None:
         dev_pid=dev_pid,
         tunnel_pid=tunnel_pid,
         owns_dev_process=owns_dev_process,
+        worktree_path=worktree_path,
+        repo_root=repo_root,
         dev_process=None,
         log_path=log_path_obj,
     )
@@ -1130,6 +1198,49 @@ def _persist_state(config: PreviewConfig, sessions: list[PreviewSession]) -> Non
         atomic_write_json(config.state_path, payload)
     except OSError as exc:
         logger.warning("preview.state_write_failed", error=str(exc))
+
+
+def _list_worktree_paths(repo_root: Path) -> set[Path] | None:
+    output = git_stdout(["worktree", "list", "--porcelain"], cwd=repo_root)
+    if not output:
+        return None
+    paths: set[Path] = set()
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            raw = line[len("worktree ") :].strip()
+            if raw:
+                paths.add(Path(raw).resolve(strict=False))
+    return paths
+
+
+def _find_pruned_sessions(sessions: list[PreviewSession]) -> list[PreviewSession]:
+    pruned: list[PreviewSession] = []
+    worktree_cache: dict[Path, set[Path] | None] = {}
+    for session in sessions:
+        worktree_path = session.worktree_path
+        if worktree_path is None:
+            continue
+        if not worktree_path.exists():
+            pruned.append(session)
+            continue
+        repo_root = session.repo_root or resolve_main_worktree_root(worktree_path)
+        if repo_root is None:
+            continue
+        repo_root = repo_root.resolve(strict=False)
+        worktree_path_resolved = worktree_path.resolve(strict=False)
+        if worktree_path_resolved == repo_root:
+            pruned.append(session)
+            continue
+        if repo_root in worktree_cache:
+            worktrees = worktree_cache[repo_root]
+        else:
+            worktrees = _list_worktree_paths(repo_root)
+            worktree_cache[repo_root] = worktrees
+        if worktrees is None:
+            continue
+        if worktree_path_resolved not in worktrees:
+            pruned.append(session)
+    return pruned
 
 
 def _format_started(
@@ -1161,14 +1272,18 @@ def _describe_dev_status(*, session: PreviewSession, config: PreviewConfig) -> s
 
 
 def _format_stopped(session: PreviewSession) -> str:
-    return f"Preview stopped on port {session.port}."
+    url = session.url or "(url unavailable)"
+    return f"Preview stopped on port {session.port}.\nURL: {url}"
 
 
 def _format_killall(sessions: list[PreviewSession]) -> str:
     if not sessions:
         return "No active previews."
-    ports = ", ".join(str(session.port) for session in sessions)
-    return f"Stopped previews on ports: {ports}."
+    lines = ["Stopped previews:"]
+    for session in sorted(sessions, key=lambda item: item.port):
+        url = session.url or "(url unavailable)"
+        lines.append(f"- port {session.port} | {url}")
+    return "\n".join(lines)
 
 
 def _format_list(sessions: list[PreviewSession]) -> str:
