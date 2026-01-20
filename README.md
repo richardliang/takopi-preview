@@ -68,7 +68,8 @@ NODE_ENV = "development"
 tailscale_bin = "tailscale"
 local_host = "127.0.0.1"
 
-[projects.myapp.preview]
+# per-project overrides (Takopi project tables are strict, so use plugins.preview.projects)
+[plugins.preview.projects.myapp]
 port = 5173
 dev_command = "npm run dev -- --host 127.0.0.1 --port {port}"
 ```
@@ -76,13 +77,16 @@ dev_command = "npm run dev -- --host 127.0.0.1 --port {port}"
 notes:
 
 - `dev_command` may include `{port}`; it will be substituted at runtime.
-- set `auto_start = false` if you start your dev server manually.
+- `dev_command` is required when `auto_start = true`. set `auto_start = false` to manage the dev server yourself.
+- Inline `--dev`/`--` overrides enable auto-start for that run; use `--no-start` to force manual mode.
 - `ttl_minutes = 0` disables expiration.
 - empty `allowed_user_ids` means no allowlist enforcement.
 
 ## commands
 
 - `/preview start [port]`: start a preview for the current context
+- `/preview start [port] --dev "<command>"`: override the dev command for this run
+- `/preview start [port] -- <command>`: shorthand for an inline dev command
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
