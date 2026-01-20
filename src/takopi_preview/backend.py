@@ -768,11 +768,21 @@ def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
         config.tailscale_bin,
         "serve",
         "--bg",
+        "--https",
+        "443",
+        "--set-path",
+        path,
+        target,
+    ]
+    legacy = [
+        config.tailscale_bin,
+        "serve",
+        "--bg",
         "--https=443",
         path,
         target,
     ]
-    _run(cmd, "preview.tailscale_on")
+    _run_tailscale(cmd, "preview.tailscale_on", fallback=legacy)
 
 
 def _tailscale_http_off(*, config: PreviewConfig, port: int) -> None:
@@ -781,11 +791,20 @@ def _tailscale_http_off(*, config: PreviewConfig, port: int) -> None:
     cmd = [
         config.tailscale_bin,
         "serve",
+        "--https",
+        "443",
+        "--set-path",
+        path,
+        "off",
+    ]
+    legacy = [
+        config.tailscale_bin,
+        "serve",
         "--https=443",
         path,
         "off",
     ]
-    _run(cmd, "preview.tailscale_off")
+    _run_tailscale(cmd, "preview.tailscale_off", fallback=legacy)
 
 
 def _ensure_tailscale(config: PreviewConfig) -> None:
@@ -804,6 +823,23 @@ def _run(cmd: list[str], log_event: str) -> None:
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip()
         raise ConfigError(message or "tailscale command failed")
+
+
+def _run_tailscale(
+    cmd: list[str],
+    log_event: str,
+    *,
+    fallback: list[str] | None = None,
+) -> None:
+    try:
+        _run(cmd, log_event)
+    except ConfigError as exc:
+        if fallback is None:
+            raise
+        message = str(exc).lower()
+        if "invalid argument format" not in message and "unknown flag" not in message:
+            raise
+        _run(fallback, log_event)
 
 
 def _build_url(*, config: PreviewConfig, port: int) -> str | None:
