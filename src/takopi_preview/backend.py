@@ -432,7 +432,8 @@ class PreviewCommand:
                 context=context,
                 cwd=cwd,
             )
-            return CommandResult(text=_format_started(session))
+            dev_status = _describe_dev_status(session=session, config=config)
+            return CommandResult(text=_format_started(session, dev_status=dev_status))
         if command == "list":
             sessions = await MANAGER.list_sessions(config=config)
             return CommandResult(text=_format_list(sessions))
@@ -1131,14 +1132,32 @@ def _persist_state(config: PreviewConfig, sessions: list[PreviewSession]) -> Non
         logger.warning("preview.state_write_failed", error=str(exc))
 
 
-def _format_started(session: PreviewSession) -> str:
+def _format_started(
+    session: PreviewSession,
+    *,
+    dev_status: str | None = None,
+) -> str:
     url = session.url or "(url unavailable)"
     context = f"\n{session.context_line}" if session.context_line else ""
+    if dev_status is None:
+        dev_status = "started by preview" if session.owns_dev_process else "external"
+    dev_line = f"Dev server: {dev_status}"
     return (
-        f"Preview started on port {session.port}.\n"
-        f"URL: {url}{context}\n"
+        f"Tailscale preview enabled on port {session.port}.\n"
+        f"{dev_line}\n"
+        f"Open: {url}{context}\n"
         f"ID: {session.session_id}"
     )
+
+
+def _describe_dev_status(*, session: PreviewSession, config: PreviewConfig) -> str:
+    if session.owns_dev_process:
+        return "started by preview"
+    host = config.local_host
+    port = session.port
+    if _is_port_available(host, port):
+        return f"not detected on {host}:{port}"
+    return f"port in use on {host}:{port}"
 
 
 def _format_stopped(session: PreviewSession) -> str:
