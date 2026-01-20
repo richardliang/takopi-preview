@@ -197,7 +197,11 @@ class PreviewManager:
                 self._sessions.pop(session.port, None)
 
         for session in expired:
-            _stop_session(config=config, session=session)
+            await asyncio.to_thread(
+                _stop_session,
+                config=config,
+                session=session,
+            )
 
         if expired:
             await self._persist_state(config)
@@ -248,7 +252,11 @@ class PreviewManager:
                 raise
 
         try:
-            _tailscale_http_on(config=config, port=port)
+            await asyncio.to_thread(
+                _tailscale_http_on,
+                config=config,
+                port=port,
+            )
         except Exception:
             if dev_process is not None:
                 _stop_process(dev_process)
@@ -283,7 +291,11 @@ class PreviewManager:
         async with self._lock:
             self._sessions.pop(session.port, None)
 
-        _stop_session(config=config, session=session)
+        await asyncio.to_thread(
+            _stop_session,
+            config=config,
+            session=session,
+        )
         await self._persist_state(config)
         return session
 
@@ -295,7 +307,11 @@ class PreviewManager:
             self._sessions.clear()
 
         for session in sessions:
-            _stop_session(config=config, session=session)
+            await asyncio.to_thread(
+                _stop_session,
+                config=config,
+                session=session,
+            )
 
         await self._persist_state(config)
         return sessions
