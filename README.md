@@ -121,6 +121,7 @@ on the next command invocation.
 ## errors
 
 - missing tailscale: follow the install docs and run `tailscale up`.
+- serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
 - port already in use: run `/preview list` or pick a new port.
 - dev server failures: the error includes log tail + log path.
 
