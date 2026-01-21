@@ -370,6 +370,24 @@ class CloudflareSessionTests(unittest.TestCase):
 
 
 class TailscaleSessionTests(unittest.TestCase):
+    def test_extract_tailscale_ports_root_path(self) -> None:
+        config = backend.PreviewConfig.from_config(
+            {"provider": "tailscale", "path_prefix": "/"},
+            config_path=Path("takopi.toml"),
+        )
+        payload = {
+            "Web": {
+                "host.ts.net:443": {
+                    "Handlers": {
+                        "/": {"Proxy": "http://127.0.0.1:5173"},
+                        "/preview/9999": {"Proxy": "http://127.0.0.1:9999"},
+                    }
+                }
+            }
+        }
+        ports = backend._extract_tailscale_ports(payload, config)
+        self.assertEqual(ports, {5173})
+
     def test_start_clears_tailscale_conflict(self) -> None:
         manager = backend.PreviewManager()
         config = backend.PreviewConfig.from_config(

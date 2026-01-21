@@ -60,6 +60,7 @@ default_port = 3000
 dev_command = "pnpm dev -- --host 127.0.0.1 --port {port}"
 auto_start = true
 ttl_minutes = 120
+path_prefix = "/preview"
 allowed_user_ids = [123456789]
 
 # optional env injection for the dev server
@@ -71,6 +72,7 @@ local_host = "127.0.0.1"
 cloudflared_bin = "cloudflared"
 cloudflared_timeout_seconds = 30
 cloudflared_args = ["--no-autoupdate"]
+path_prefix = "/preview"
 
 # tailscale-specific
 tailscale_bin = "tailscale"
@@ -126,6 +128,9 @@ https://DEVICE.TAILNET.ts.net/preview/5173
   `cloudflared tunnel --url` processes to prevent stale sessions.
 - tailscale: if the requested port is already served, takopi will attempt to
   disable the existing serve entry before starting a new preview.
+- tailscale: set `path_prefix = "/"` to serve from the tailnet root. This
+  avoids subpath issues with apps that assume `/`, but only one preview can be
+  served at a time.
 
 dev server logs (when auto-started) are written to:
 
