@@ -170,7 +170,7 @@ class PreviewSession:
     owns_dev_process: bool
     worktree_path: Path | None = None
     repo_root: Path | None = None
-    tunnel_process: subprocess.Popen[str] | None = None
+    tunnel_process: subprocess.Popen[bytes] | None = None
     dev_process: subprocess.Popen[str] | None = None
     log_path: Path | None = None
 
@@ -944,44 +944,43 @@ def _ensure_cloudflared(config: PreviewConfig) -> None:
 
 
 def _read_cloudflared_url(
-    process: subprocess.Popen[str], timeout_seconds: int
+    process: subprocess.Popen[bytes], timeout_seconds: int
 ) -> str | None:
-    streams = [process.stderr, process.stdout]
-    fd_map = {}
-    for stream in streams:
+    fds: list[int] = []
+    for stream in (process.stderr, process.stdout):
         if stream is None:
             continue
         try:
-            fd_map[stream.fileno()] = stream
+            fds.append(stream.fileno())
         except OSError:
             continue
-    if not fd_map:
+    if not fds:
         return None
 
     buffer = ""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         remaining = max(0.0, deadline - time.monotonic())
-        ready, _, _ = select.select(list(fd_map.keys()), [], [], remaining)
+        ready, _, _ = select.select(fds, [], [], remaining)
         if not ready:
             if process.poll() is not None:
                 break
             continue
         for fd in ready:
-            stream = fd_map.get(fd)
-            if stream is None:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
                 continue
-            chunk = stream.read(4096)
             if not chunk:
                 continue
-            buffer += chunk
+            buffer += chunk.decode("utf-8", errors="replace")
             match = CLOUDFLARED_URL_RE.search(buffer)
             if match:
                 return match.group(0)
     return None
 
 
-def _stop_tunnel_process(process: subprocess.Popen[str]) -> None:
+def _stop_tunnel_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     try:
@@ -999,7 +998,7 @@ def _stop_tunnel_process(process: subprocess.Popen[str]) -> None:
 
 def _cloudflared_start(
     *, config: PreviewConfig, port: int
-) -> tuple[subprocess.Popen[str], str]:
+) -> tuple[subprocess.Popen[bytes], str]:
     _ensure_cloudflared(config)
     target = f"http://{config.local_host}:{port}"
     cmd = [
@@ -1014,8 +1013,9 @@ def _cloudflared_start(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         start_new_session=True,
+        text=False,
+        bufsize=0,
     )
     url = _read_cloudflared_url(process, config.cloudflared_timeout_seconds)
     if url is None:
