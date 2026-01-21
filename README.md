@@ -1,15 +1,13 @@
 # takopi-preview
 
 preview command plugin for takopi. starts a dev server (optional), exposes it
-via `tailscale serve` or Cloudflare quick tunnels, and tracks preview sessions
-by project/worktree context.
+via `tailscale serve`, and tracks preview sessions by project/worktree context.
 
 published as the `takopi-preview` package. the command id is `preview`.
 
 ## features
 
 - `/preview` commands to start, list, stop, and clean up previews
-- provider options: tailnet-only URLs (tailscale) or public quick tunnels (cloudflare)
 - per-project overrides for ports and dev commands
 - optional dev server auto-start with `{port}` substitution
 - session registry with ttl expiration
@@ -21,7 +19,6 @@ published as the `takopi-preview` package. the command id is `preview`.
 - takopi >= 0.20
 - provider tooling:
   - tailscale installed and authenticated on the host (`tailscale up`)
-  - or cloudflared installed for quick tunnels
 - dev server binds to 127.0.0.1 (tunnels proxy locally)
 - security groups should not expose the dev server port publicly
 
@@ -42,8 +39,8 @@ pip install takopi-transport-slack takopi-preview
 
 ## setup
 
-1. install a provider: tailscale (`tailscale up`) or cloudflared.
-2. if using tailscale, enable magicdns so `DEVICE.TAILNET.ts.net` resolves.
+1. install tailscale and authenticate (`tailscale up`).
+2. enable magicdns so `DEVICE.TAILNET.ts.net` resolves.
 3. run takopi with your transport (slack or telegram) as usual.
 
 ## configuration
@@ -55,7 +52,7 @@ add to `~/.takopi/takopi.toml`:
 enabled = ["takopi-transport-slack", "takopi-preview"]
 
 [plugins.preview]
-provider = "cloudflare"
+provider = "tailscale"
 default_port = 3000
 dev_command = "pnpm dev -- --host 127.0.0.1 --port {port}"
 auto_start = true
@@ -69,9 +66,6 @@ NODE_ENV = "development"
 
 # advanced overrides
 local_host = "127.0.0.1"
-cloudflared_bin = "cloudflared"
-cloudflared_timeout_seconds = 30
-cloudflared_args = ["--no-autoupdate"]
 path_prefix = "/preview"
 
 # tailscale-specific
@@ -85,7 +79,6 @@ dev_command = "npm run dev -- --host 127.0.0.1 --port {port}"
 
 notes:
 
-- `provider = "cloudflare"` uses quick tunnels (`*.trycloudflare.com`) and does not require a Cloudflare account.
 - `provider = "tailscale"` uses tailnet-only urls from `tailscale serve`.
 - `dev_command` may include `{port}`; it will be substituted at runtime.
 - `dev_command` is required when `auto_start = true`. set `auto_start = false` to manage the dev server yourself.
@@ -112,8 +105,6 @@ notes:
 3. open the returned url, for example:
 
 ```
-https://random-words.trycloudflare.com
-# tailscale provider example:
 https://DEVICE.TAILNET.ts.net/preview/5173
 ```
 
@@ -122,10 +113,6 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 ## state and ttl
 
 - tailscale: sessions are derived from `tailscale serve status`; no preview state file is written.
-- cloudflare: sessions are tracked in-process; list/killall will also scan for
-  `cloudflared tunnel --url` processes (external URLs may be unavailable).
-- cloudflare: on the first preview command, takopi stops any existing
-  `cloudflared tunnel --url` processes to prevent stale sessions.
 - tailscale: if the requested port is already served, takopi will attempt to
   disable the existing serve entry before starting a new preview.
 - tailscale: set `path_prefix = "/"` to serve from the tailnet root. This
@@ -144,7 +131,6 @@ takopi shutdown stops all previews.
 ## errors
 
 - missing tailscale: follow the install docs and run `tailscale up`.
-- missing cloudflared: install cloudflared from the Cloudflare docs or GitHub releases.
 - serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
 - port already in use: when auto-starting, takopi will try to stop listeners on
   that port; if it is still busy, run `/preview list` or pick a new port.
@@ -157,9 +143,8 @@ this implementation follows the webapp preview workflow spec:
 
 - [x] command surface: start/list/stop/killall/help
 - [x] config in `[plugins.preview]` with per-project overrides
-- [x] provider support: tailscale serve or cloudflare quick tunnels
-- [x] tailnet-only https urls (tailscale) or public https urls (cloudflare)
-- [x] tailscale serve registry or in-process tunnel registry
+- [x] tailscale serve for tailnet-only preview urls
+- [x] tailscale serve registry
 - [x] ttl-based expiration (`ttl_minutes`)
 - [x] allowlist enforcement via `allowed_user_ids`
 
