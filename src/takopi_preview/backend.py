@@ -358,6 +358,24 @@ class PreviewManager:
             )
         return pruned
 
+    async def expire_crashed(self, config: PreviewConfig) -> list[PreviewSession]:
+        self._last_config = config
+
+        async with self._lock:
+            if not self._sessions:
+                return []
+            sessions = list(self._sessions.values())
+
+        active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
+        crashed = [session for session in sessions if session.port not in active_ports]
+        if not crashed:
+            return []
+
+        async with self._lock:
+            for session in crashed:
+                self._sessions.pop(session.port, None)
+        return crashed
+
     async def _clear_tailscale_conflict(
         self, *, config: PreviewConfig, port: int
     ) -> None:
@@ -407,6 +425,9 @@ class PreviewCommand:
         await MANAGER.ensure_expiry_loop(config)
         await MANAGER.expire_stale(config)
         await MANAGER.expire_pruned(config)
+        crashed = await MANAGER.expire_crashed(config)
+        if crashed:
+            return CommandResult(text=_format_crashed(crashed), notify=True)
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
@@ -1081,6 +1102,17 @@ def _format_list(sessions: list[PreviewSession]) -> str:
         lines.append(
             f"- {session.session_id} | port {session.port} | {url} | {age} | {context}"
         )
+    return "\n".join(lines)
+
+
+def _format_crashed(sessions: list[PreviewSession]) -> str:
+    if not sessions:
+        return "preview error: preview port stopped unexpectedly."
+    lines = ["preview error: preview port(s) stopped unexpectedly:"]
+    for session in sorted(sessions, key=lambda item: item.port):
+        url = session.url or "(url unavailable)"
+        lines.append(f"- port {session.port} | {url}")
+    lines.append("Restart your dev server and run /preview start to re-enable.")
     return "\n".join(lines)
 
 

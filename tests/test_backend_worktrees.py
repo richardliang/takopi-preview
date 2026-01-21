@@ -210,6 +210,104 @@ class WorktreePolicyTests(unittest.TestCase):
         self.assertIn("https://example/preview/5175", output)
 
 
+class CrashDetectionTests(unittest.TestCase):
+    def test_expire_crashed_removes_missing_ports(self) -> None:
+        manager = backend.PreviewManager()
+        config = backend.PreviewConfig.from_config(
+            {"provider": "tailscale"},
+            config_path=Path("takopi.toml"),
+        )
+        session = backend.PreviewSession(
+            session_id="sess-crash",
+            project="proj",
+            branch="feat-crash",
+            port=5173,
+            url="https://example/preview/5173",
+            created_at=time.time(),
+            last_seen=time.time(),
+            context_line=None,
+        )
+        manager._sessions[session.port] = session
+
+        original_list = backend._tailscale_list_ports
+        backend._tailscale_list_ports = lambda _config: set()
+        try:
+            crashed = asyncio.run(manager.expire_crashed(config))
+        finally:
+            backend._tailscale_list_ports = original_list
+
+        self.assertEqual(crashed, [session])
+        self.assertNotIn(session.port, manager._sessions)
+
+    def test_format_crashed_includes_ports(self) -> None:
+        session = backend.PreviewSession(
+            session_id="sess-crash-format",
+            project="proj",
+            branch="feat-crash",
+            port=5173,
+            url="https://example/preview/5173",
+            created_at=time.time(),
+            last_seen=time.time(),
+            context_line=None,
+        )
+        output = backend._format_crashed([session])
+        self.assertIn("preview error", output)
+        self.assertIn("5173", output)
+        self.assertIn("https://example/preview/5173", output)
+
+    def test_handle_returns_error_on_crashed_ports(self) -> None:
+        command = backend.PreviewCommand()
+        session = backend.PreviewSession(
+            session_id="sess-crash-handle",
+            project="proj",
+            branch="feat-crash",
+            port=5173,
+            url="https://example/preview/5173",
+            created_at=time.time(),
+            last_seen=time.time(),
+            context_line=None,
+        )
+        manager = backend.MANAGER
+        previous_sessions = dict(manager._sessions)
+        previous_config = manager._last_config
+        previous_task = manager._expiry_task
+        manager._sessions = {session.port: session}
+
+        original_list = backend._tailscale_list_ports
+        backend._tailscale_list_ports = lambda _config: set()
+
+        class _Runtime:
+            def resolve_message(self, text, reply_text, chat_id):
+                return types.SimpleNamespace(context=None)
+
+            def format_context_line(self, context):
+                return None
+
+            def resolve_run_cwd(self, context):
+                return None
+
+        ctx = types.SimpleNamespace(
+            args=("list",),
+            text="/preview list",
+            reply_text=None,
+            runtime=_Runtime(),
+            message=types.SimpleNamespace(channel_id=None, sender_id=None),
+            plugin_config={"ttl_minutes": 0},
+            config_path=Path("takopi.toml"),
+        )
+        try:
+            result = asyncio.run(command._handle(ctx))
+        finally:
+            backend._tailscale_list_ports = original_list
+            manager._sessions = previous_sessions
+            manager._last_config = previous_config
+            manager._expiry_task = previous_task
+
+        self.assertIn("preview error", result.text)
+        self.assertIn("5173", result.text)
+        self.assertTrue(result.notify)
+
+
 class ConfigValidationTests(unittest.TestCase):
     def test_rejects_cloudflare_provider(self) -> None:
         with self.assertRaises(ConfigError):
