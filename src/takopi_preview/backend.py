@@ -284,6 +284,11 @@ class PreviewManager:
                 active_ports = set(cloudflared_ports.keys())
                 async with self._lock:
                     in_sessions = port in self._sessions
+            elif config.provider == "tailscale":
+                await self._clear_tailscale_conflict(config=config, port=port)
+                active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
+                async with self._lock:
+                    in_sessions = port in self._sessions
             if in_sessions or port in active_ports:
                 raise ConfigError(
                     f"Preview already active on port {port}. Try /preview list."
@@ -556,6 +561,20 @@ class PreviewManager:
         else:
             if session.tunnel_pid is None:
                 session.tunnel_pid = pid
+        await asyncio.to_thread(
+            _stop_session,
+            config=config,
+            session=session,
+        )
+
+    async def _clear_tailscale_conflict(
+        self, *, config: PreviewConfig, port: int
+    ) -> None:
+        now = time.time()
+        async with self._lock:
+            session = self._sessions.pop(port, None)
+        if session is None:
+            session = _external_session(config=config, port=port, now=now)
         await asyncio.to_thread(
             _stop_session,
             config=config,

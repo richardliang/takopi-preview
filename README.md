@@ -124,6 +124,8 @@ https://DEVICE.TAILNET.ts.net/preview/5173
   `cloudflared tunnel --url` processes (external URLs may be unavailable).
 - cloudflare: on the first preview command, takopi stops any existing
   `cloudflared tunnel --url` processes to prevent stale sessions.
+- tailscale: if the requested port is already served, takopi will attempt to
+  disable the existing serve entry before starting a new preview.
 
 dev server logs (when auto-started) are written to:
 
