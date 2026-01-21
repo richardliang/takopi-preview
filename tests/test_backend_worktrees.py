@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,6 +231,13 @@ class ConfigValidationTests(unittest.TestCase):
                 config_path=Path("takopi.toml"),
             )
 
+    def test_rejects_invalid_https_port(self) -> None:
+        with self.assertRaises(ConfigError):
+            backend.PreviewConfig.from_config(
+                {"tailscale_https_port": 0},
+                config_path=Path("takopi.toml"),
+            )
+
 
 class PreviewParsingTests(unittest.TestCase):
     def test_extract_ports_from_text(self) -> None:
@@ -264,6 +272,26 @@ class TailscaleSessionTests(unittest.TestCase):
         }
         ports = backend._extract_tailscale_ports(payload, config)
         self.assertEqual(ports, {5173})
+
+    def test_build_url_uses_port_for_root_path(self) -> None:
+        config = backend.PreviewConfig.from_config(
+            {"path_prefix": "/"},
+            config_path=Path("takopi.toml"),
+        )
+        original = backend._get_dns_name
+        backend._get_dns_name = lambda _config: "host.ts.net"
+        try:
+            self.assertEqual(
+                backend._build_url(config=config, port=5173),
+                "https://host.ts.net:5173",
+            )
+            override = replace(config, tailscale_https_port=443)
+            self.assertEqual(
+                backend._build_url(config=override, port=5173),
+                "https://host.ts.net",
+            )
+        finally:
+            backend._get_dns_name = original
 
     def test_start_clears_tailscale_conflict(self) -> None:
         manager = backend.PreviewManager()

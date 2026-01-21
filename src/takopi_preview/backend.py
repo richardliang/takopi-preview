@@ -47,6 +47,7 @@ class PreviewConfig:
     allowed_user_ids: set[int] | None
     env: dict[str, str]
     tailscale_bin: str
+    tailscale_https_port: int | None
     local_host: str
     logs_dir: Path
     path_prefix: str
@@ -115,6 +116,16 @@ class PreviewConfig:
         tailscale_bin = (
             _optional_str(config, "tailscale_bin", config_path=config_path) or "tailscale"
         )
+        tailscale_https_port = _optional_int(
+            config, "tailscale_https_port", config_path=config_path
+        )
+        if tailscale_https_port is not None and not (
+            1 <= tailscale_https_port <= 65535
+        ):
+            raise ConfigError(
+                f"Invalid `preview.tailscale_https_port` in {config_path}; "
+                "expected a valid port."
+            )
         local_host = (
             _optional_str(config, "local_host", config_path=config_path) or "127.0.0.1"
         )
@@ -133,6 +144,7 @@ class PreviewConfig:
             allowed_user_ids=allowed_user_ids,
             env=env,
             tailscale_bin=tailscale_bin,
+            tailscale_https_port=tailscale_https_port,
             local_host=local_host,
             logs_dir=logs_dir,
             path_prefix=path_prefix,
@@ -918,16 +930,25 @@ def _parse_local_target_port(
     return parsed.port
 
 
+def _tailscale_https_port(config: PreviewConfig, port: int) -> int:
+    if config.tailscale_https_port is not None:
+        return config.tailscale_https_port
+    if config.path_prefix in {"", "/"}:
+        return port
+    return 443
+
+
 def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
     target = f"http://{config.local_host}:{port}"
     path = _build_path(config, port)
+    https_port = _tailscale_https_port(config, port)
     cmd = [
         config.tailscale_bin,
         "serve",
         "--bg",
         "--https",
-        "443",
+        str(https_port),
         "--set-path",
         path,
         target,
@@ -936,7 +957,7 @@ def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
         config.tailscale_bin,
         "serve",
         "--bg",
-        "--https=443",
+        f"--https={https_port}",
         path,
         target,
     ]
@@ -946,11 +967,12 @@ def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
 def _tailscale_http_off(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
     path = _build_path(config, port)
+    https_port = _tailscale_https_port(config, port)
     cmd = [
         config.tailscale_bin,
         "serve",
         "--https",
-        "443",
+        str(https_port),
         "--set-path",
         path,
         "off",
@@ -958,7 +980,7 @@ def _tailscale_http_off(*, config: PreviewConfig, port: int) -> None:
     legacy = [
         config.tailscale_bin,
         "serve",
-        "--https=443",
+        f"--https={https_port}",
         path,
         "off",
     ]
@@ -1113,9 +1135,11 @@ def _build_url(*, config: PreviewConfig, port: int) -> str | None:
     if dns is None:
         return None
     path = _build_path(config, port)
+    https_port = _tailscale_https_port(config, port)
+    host = dns if https_port == 443 else f"{dns}:{https_port}"
     if path == "/":
-        return f"https://{dns}"
-    return f"https://{dns}{path}"
+        return f"https://{host}"
+    return f"https://{host}{path}"
 
 
 def _get_dns_name(config: PreviewConfig) -> str | None:
