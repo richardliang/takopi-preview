@@ -58,6 +58,7 @@ dev_command = "pnpm dev -- --host 127.0.0.1 --port {port}"
 auto_start = true
 ttl_minutes = 120
 path_prefix = "/preview"
+tailscale_https_port = 443
 allowed_user_ids = [123456789]
 
 # optional env injection for the dev server
@@ -67,6 +68,7 @@ NODE_ENV = "development"
 # advanced overrides
 local_host = "127.0.0.1"
 path_prefix = "/preview"
+tailscale_https_port = 443
 
 # tailscale-specific
 tailscale_bin = "tailscale"
@@ -117,7 +119,10 @@ https://DEVICE.TAILNET.ts.net/preview/5173
   disable the existing serve entry before starting a new preview.
 - tailscale: set `path_prefix = "/"` to serve from the tailnet root. This
   avoids subpath issues with apps that assume `/`, but only one preview can be
-  served at a time.
+  served at a time unless you also set per-preview HTTPS ports.
+- tailscale: when `path_prefix = "/"`, the default HTTPS port is the preview
+  port (so `5173` maps to `https://host.ts.net:5173`). Set
+  `tailscale_https_port = 443` to force the default HTTPS port.
 
 dev server logs (when auto-started) are written to:
 
