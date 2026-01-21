@@ -369,5 +369,57 @@ class CloudflareSessionTests(unittest.TestCase):
         self.assertEqual(ports, {4444, 5555, 6666})
 
 
+class TailscaleSessionTests(unittest.TestCase):
+    def test_start_clears_tailscale_conflict(self) -> None:
+        manager = backend.PreviewManager()
+        config = backend.PreviewConfig.from_config(
+            {"provider": "tailscale", "auto_start": False},
+            config_path=Path("takopi.toml"),
+        )
+        calls = {"off": 0, "on": 0}
+        list_calls = {"count": 0}
+
+        def _list_ports(_config):
+            list_calls["count"] += 1
+            if list_calls["count"] == 1:
+                return {5173}
+            return set()
+
+        original_list = backend._tailscale_list_ports
+        original_on = backend._tailscale_http_on
+        original_off = backend._tailscale_http_off
+        original_build_url = backend._build_url
+        backend._tailscale_list_ports = _list_ports
+        backend._tailscale_http_on = lambda **_kwargs: calls.__setitem__(
+            "on", calls["on"] + 1
+        )
+        backend._tailscale_http_off = lambda **_kwargs: calls.__setitem__(
+            "off", calls["off"] + 1
+        )
+        backend._build_url = (
+            lambda *, config, port: f"https://example.ts.net/preview/{port}"
+        )
+        try:
+            session = asyncio.run(
+                manager.start(
+                    config=config,
+                    port=5173,
+                    context_line=None,
+                    context=None,
+                    cwd=None,
+                    worktree_path=None,
+                    repo_root=None,
+                )
+            )
+        finally:
+            backend._tailscale_list_ports = original_list
+            backend._tailscale_http_on = original_on
+            backend._tailscale_http_off = original_off
+            backend._build_url = original_build_url
+        self.assertEqual(calls["off"], 1)
+        self.assertEqual(calls["on"], 1)
+        self.assertEqual(session.port, 5173)
+
+
 if __name__ == "__main__":
     unittest.main()
