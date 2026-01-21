@@ -3,14 +3,11 @@ from __future__ import annotations
 import atexit
 import asyncio
 import json
-import os
 import re
-import signal
-import socket
 import subprocess
 import time
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +26,8 @@ logger = get_logger(__name__)
 SAFE_PORT_MIN = 1024
 SAFE_PORT_MAX = 65535
 DEFAULT_TTL_MINUTES = 120
-LOGS_DIRNAME = "preview-logs"
 PATH_PREFIX = "/preview"
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
-LISTEN_PID_RE = re.compile(r"pid=(\d+)")
 LOCAL_PROXY_PORT_RE = re.compile(
     r"http://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)"
 )
@@ -41,15 +36,11 @@ LOCAL_PROXY_PORT_RE = re.compile(
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
     default_port: int
-    dev_command: str | None
-    auto_start: bool
     ttl_minutes: int
     allowed_user_ids: set[int] | None
-    env: dict[str, str]
     tailscale_bin: str
     tailscale_https_port: int | None
     local_host: str
-    logs_dir: Path
     path_prefix: str
 
     @classmethod
@@ -79,23 +70,18 @@ class PreviewConfig:
                 f"Invalid preview config in {config_path}; "
                 "cloudflare options have been removed."
             )
+        if any(key in config for key in ("dev_command", "auto_start", "env")):
+            raise ConfigError(
+                f"Invalid preview config in {config_path}; "
+                "dev server auto-start has been removed. "
+                "Start your server separately and use preview to serve ports."
+            )
 
         default_port = _optional_int(config, "port", config_path=config_path)
         if default_port is None:
             default_port = _optional_int(config, "default_port", config_path=config_path)
         if default_port is None:
             default_port = 3000
-
-        dev_command = _optional_str(config, "dev_command", config_path=config_path)
-        if dev_command is not None and not dev_command:
-            raise ConfigError(
-                f"Invalid `preview.dev_command` in {config_path}; "
-                "expected a non-empty string."
-            )
-
-        auto_start = _optional_bool(config, "auto_start", config_path=config_path)
-        if auto_start is None:
-            auto_start = True
 
         ttl_minutes = _optional_int(config, "ttl_minutes", config_path=config_path)
         if ttl_minutes is None:
@@ -112,7 +98,6 @@ class PreviewConfig:
         if allowed_user_ids is not None and not allowed_user_ids:
             allowed_user_ids = None
 
-        env = _optional_env(config, "env", config_path=config_path)
         tailscale_bin = (
             _optional_str(config, "tailscale_bin", config_path=config_path) or "tailscale"
         )
@@ -133,20 +118,13 @@ class PreviewConfig:
             _optional_str(config, "path_prefix", config_path=config_path) or PATH_PREFIX
         )
 
-        state_dir = config_path.parent / "state"
-        logs_dir = state_dir / LOGS_DIRNAME
-
         return cls(
             default_port=default_port,
-            dev_command=dev_command,
-            auto_start=auto_start,
             ttl_minutes=ttl_minutes,
             allowed_user_ids=allowed_user_ids,
-            env=env,
             tailscale_bin=tailscale_bin,
             tailscale_https_port=tailscale_https_port,
             local_host=local_host,
-            logs_dir=logs_dir,
             path_prefix=path_prefix,
         )
 
@@ -161,12 +139,8 @@ class PreviewSession:
     created_at: float
     last_seen: float
     context_line: str | None
-    dev_pid: int | None
-    owns_dev_process: bool
     worktree_path: Path | None = None
     repo_root: Path | None = None
-    dev_process: subprocess.Popen[str] | None = None
-    log_path: Path | None = None
 
     def touch(self, now: float | None = None) -> None:
         self.last_seen = now or time.time()
@@ -236,39 +210,6 @@ class PreviewManager:
                     f"Preview already active on port {port}. Try /preview list."
                 )
 
-        dev_process = None
-        log_path = None
-        owns_dev_process = False
-        if config.auto_start:
-            if not config.dev_command:
-                raise ConfigError("preview.dev_command is required when auto_start=true")
-            if not _is_port_available(config.local_host, port):
-                killed = _kill_port_listeners(port)
-                if killed:
-                    logger.info(
-                        "preview.port_conflict_killed",
-                        port=port,
-                        pids=sorted(killed),
-                    )
-                if not _is_port_available(config.local_host, port):
-                    raise ConfigError(
-                        f"Port {port} is already in use. Try /preview list or another port."
-                    )
-            dev_process, log_path = _start_dev_server(
-                command=config.dev_command,
-                port=port,
-                cwd=cwd,
-                env=config.env,
-                logs_dir=config.logs_dir,
-                session_id=_build_session_id(context, port),
-            )
-            owns_dev_process = True
-            try:
-                await _verify_dev_server(dev_process, log_path)
-            except ConfigError:
-                _stop_process(dev_process)
-                raise
-
         url = None
         try:
             await asyncio.to_thread(
@@ -278,8 +219,6 @@ class PreviewManager:
             )
             url = _build_url(config=config, port=port)
         except Exception:
-            if dev_process is not None:
-                _stop_process(dev_process)
             raise
 
         session = PreviewSession(
@@ -291,12 +230,8 @@ class PreviewManager:
             created_at=time.time(),
             last_seen=time.time(),
             context_line=context_line,
-            dev_pid=dev_process.pid if dev_process is not None else None,
-            owns_dev_process=owns_dev_process,
             worktree_path=worktree_path,
             repo_root=repo_root,
-            dev_process=dev_process,
-            log_path=log_path,
         )
 
         async with self._lock:
@@ -475,13 +410,7 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port, dev_command, auto_start = _parse_start_args(ctx.args[1:], config)
-            if dev_command is not None or auto_start is not None:
-                config = _override_config(
-                    config,
-                    dev_command=dev_command,
-                    auto_start=auto_start,
-                )
+            port = _parse_start_args(ctx.args[1:], config)
             worktree_path, repo_root = _require_worktree(cwd)
             session = await MANAGER.start(
                 config=config,
@@ -492,8 +421,7 @@ class PreviewCommand:
                 worktree_path=worktree_path,
                 repo_root=repo_root,
             )
-            dev_status = _describe_dev_status(session=session, config=config)
-            return CommandResult(text=_format_started(session, dev_status=dev_status))
+            return CommandResult(text=_format_started(session))
         if command == "list":
             sessions = await MANAGER.list_sessions(config=config)
             return CommandResult(text=_format_list(sessions))
@@ -575,10 +503,6 @@ def _merge_preview_config(
         return base
     merged = dict(base)
     merged.update(override)
-    base_env = base.get("env")
-    override_env = override.get("env")
-    if isinstance(base_env, dict) and isinstance(override_env, dict):
-        merged["env"] = {**base_env, **override_env}
     return merged
 
 
@@ -608,17 +532,6 @@ def _optional_int(config: dict[str, Any], key: str, *, config_path: Path) -> int
     raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected an int.")
 
 
-def _optional_bool(config: dict[str, Any], key: str, *, config_path: Path) -> bool | None:
-    if key not in config:
-        return None
-    value = config.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected a bool.")
-
-
 def _optional_int_set(
     config: dict[str, Any], key: str, *, config_path: Path
 ) -> set[int] | None:
@@ -643,30 +556,6 @@ def _coerce_int(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
-
-
-def _optional_env(
-    config: dict[str, Any], key: str, *, config_path: Path
-) -> dict[str, str]:
-    if key not in config:
-        return {}
-    value = config.get(key)
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected a table.")
-    env: dict[str, str] = {}
-    for env_key, raw in value.items():
-        if not isinstance(env_key, str):
-            raise ConfigError(
-                f"Invalid `preview.{key}` in {config_path}; expected string keys."
-            )
-        if not isinstance(raw, str):
-            raise ConfigError(
-                f"Invalid `preview.{key}` in {config_path}; expected string values."
-            )
-        env[env_key] = raw
-    return env
 
 
 def _is_user_allowed(ctx: CommandContext, config: PreviewConfig) -> bool:
@@ -718,35 +607,13 @@ def _parse_port(arg: str | None) -> int | None:
 def _parse_start_args(
     args: tuple[str, ...],
     config: PreviewConfig,
-) -> tuple[int, str | None, bool | None]:
+) -> int:
     port: int | None = None
-    dev_command: str | None = None
-    auto_start: bool | None = None
     idx = 0
 
     while idx < len(args):
         token = args[idx]
-        if token == "--":
-            if idx + 1 >= len(args):
-                raise ConfigError("preview start requires a command after `--`")
-            dev_command = " ".join(args[idx + 1 :]).strip()
-            if not dev_command:
-                raise ConfigError("preview start requires a non-empty command after `--`")
-            auto_start = True
-            break
         key, value = _split_flag(token)
-        if key in {"--dev", "--dev-command", "--cmd"}:
-            if value is None:
-                idx += 1
-                if idx >= len(args):
-                    raise ConfigError("preview start requires a value after --dev-command")
-                value = args[idx]
-            dev_command = value.strip()
-            if not dev_command:
-                raise ConfigError("preview start requires a non-empty --dev-command")
-            auto_start = True
-            idx += 1
-            continue
         if key == "--port":
             if value is None:
                 idx += 1
@@ -757,10 +624,6 @@ def _parse_start_args(
             if parsed is None:
                 raise ConfigError(f"Invalid port {value!r}.")
             port = parsed
-            idx += 1
-            continue
-        if key in {"--no-start", "--manual"}:
-            auto_start = False
             idx += 1
             continue
         if key.startswith("--"):
@@ -775,7 +638,7 @@ def _parse_start_args(
 
     if port is None:
         port = config.default_port
-    return port, dev_command, auto_start
+    return port
 
 
 def _split_flag(token: str) -> tuple[str, str | None]:
@@ -794,121 +657,6 @@ def _normalize_path_prefix(prefix: str) -> str:
     if trimmed != "/" and trimmed.endswith("/"):
         trimmed = trimmed.rstrip("/")
     return trimmed
-
-
-def _override_config(
-    config: PreviewConfig,
-    *,
-    dev_command: str | None,
-    auto_start: bool | None,
-) -> PreviewConfig:
-    updates: dict[str, Any] = {}
-    if dev_command is not None:
-        updates["dev_command"] = dev_command
-    if auto_start is not None:
-        updates["auto_start"] = auto_start
-    if not updates:
-        return config
-    return replace(config, **updates)
-
-
-def _is_port_available(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
-        return True
-
-
-def _listening_pids(port: int) -> set[int]:
-    commands = [
-        (["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-n", "-P"], _parse_lsof_pids),
-        (["ss", "-ltnp", f"sport = :{port}"], _parse_ss_pids),
-    ]
-    for cmd, parser in commands:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-        except FileNotFoundError:
-            continue
-        if result.returncode != 0 or not result.stdout:
-            continue
-        pids = parser(result.stdout)
-        if pids:
-            return pids
-    return set()
-
-
-def _parse_lsof_pids(output: str) -> set[int]:
-    pids: set[int] = set()
-    lines = output.splitlines()
-    for line in lines[1:]:
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        if parts[1].isdigit():
-            pids.add(int(parts[1]))
-    return pids
-
-
-def _parse_ss_pids(output: str) -> set[int]:
-    pids: set[int] = set()
-    for line in output.splitlines():
-        for match in LISTEN_PID_RE.findall(line):
-            pids.add(int(match))
-    return pids
-
-
-def _kill_port_listeners(port: int) -> set[int]:
-    pids = _listening_pids(port)
-    for pid in pids:
-        _stop_pid(pid)
-    return pids
-
-
-def _start_dev_server(
-    *,
-    command: str,
-    port: int,
-    cwd: Path | None,
-    env: dict[str, str],
-    logs_dir: Path,
-    session_id: str,
-) -> tuple[subprocess.Popen[str], Path]:
-    command = command.format(port=port)
-    process_env = os.environ.copy()
-    process_env.update(env)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / f"{_slugify(session_id)}.log"
-    logger.info("preview.dev_start", command=command, cwd=str(cwd) if cwd else None)
-    log_handle = open(log_path, "a", encoding="utf-8")
-    process = subprocess.Popen(
-        command,
-        shell=True,
-        cwd=str(cwd) if cwd else None,
-        env=process_env,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        start_new_session=True,
-    )
-    log_handle.close()
-    return process, log_path
-
-
-async def _verify_dev_server(
-    process: subprocess.Popen[str], log_path: Path | None
-) -> None:
-    await asyncio.sleep(0.6)
-    if process.poll() is None:
-        return
-    tail = _tail_log(log_path) if log_path else None
-    message = "dev server failed to start"
-    if tail:
-        message = f"{message}\nlast output:\n{tail}\nlogs: {log_path}"
-    raise ConfigError(message)
 
 
 def _parse_local_target_port(
@@ -1173,8 +921,6 @@ def _external_session(
         created_at=0.0,
         last_seen=now,
         context_line=None,
-        dev_pid=None,
-        owns_dev_process=False,
     )
 
 
@@ -1183,45 +929,6 @@ def _stop_session(*, config: PreviewConfig, session: PreviewSession) -> None:
         _tailscale_http_off(config=config, port=session.port)
     except ConfigError as exc:
         logger.warning("preview.tailscale_off_failed", error=str(exc))
-    if session.owns_dev_process:
-        if session.dev_process is not None:
-            _stop_process(session.dev_process)
-        elif session.dev_pid is not None:
-            _stop_pid(session.dev_pid)
-
-
-def _stop_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-
-
-def _stop_pid(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        return
-    if _pid_is_alive(pid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-
-
-def _pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return False
-    return True
 
 
 def _build_session_id(context: object | None, port: int) -> str:
@@ -1259,33 +966,6 @@ def _build_path(config: PreviewConfig, port: int) -> str:
     if prefix in {"", "/"}:
         return "/"
     return f"{prefix}/{port}"
-
-
-def _slugify(value: str) -> str:
-    if not value:
-        return "preview"
-    safe = []
-    for ch in value:
-        if ch.isalnum() or ch in {"-", "_", "."}:
-            safe.append(ch)
-        else:
-            safe.append("-")
-    slug = "".join(safe).strip("-")
-    return slug or "preview"
-
-
-def _tail_log(log_path: Path | None, *, lines: int = 12) -> str | None:
-    if log_path is None or not log_path.exists():
-        return None
-    try:
-        content = log_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
-    rows = content.strip().splitlines()
-    if not rows:
-        return None
-    tail = rows[-lines:]
-    return "\n".join(tail)
 
 
 def _find_by_port(sessions: list[PreviewSession], port: int) -> PreviewSession:
@@ -1364,33 +1044,15 @@ def _find_pruned_sessions(sessions: list[PreviewSession]) -> list[PreviewSession
     return pruned
 
 
-def _format_started(
-    session: PreviewSession,
-    *,
-    dev_status: str | None = None,
-) -> str:
+def _format_started(session: PreviewSession) -> str:
     url = session.url or "(url unavailable)"
     context = f"\n{session.context_line}" if session.context_line else ""
-    if dev_status is None:
-        dev_status = "started by preview" if session.owns_dev_process else "external"
-    dev_line = f"Dev server: {dev_status}"
     label = "Tailscale preview enabled"
     return (
         f"{label} on port {session.port}.\n"
-        f"{dev_line}\n"
         f"Open: {url}{context}\n"
         f"ID: {session.session_id}"
     )
-
-
-def _describe_dev_status(*, session: PreviewSession, config: PreviewConfig) -> str:
-    if session.owns_dev_process:
-        return "started by preview"
-    host = config.local_host
-    port = session.port
-    if _is_port_available(host, port):
-        return f"not detected on {host}:{port}"
-    return f"port in use on {host}:{port}"
 
 
 def _format_stopped(session: PreviewSession) -> str:
@@ -1438,7 +1100,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start [port] [--dev <command> | -- <command>]\n"
+        "/preview start [port]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"

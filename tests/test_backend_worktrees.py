@@ -169,8 +169,6 @@ class WorktreePolicyTests(unittest.TestCase):
                 created_at=time.time(),
                 last_seen=time.time(),
                 context_line=None,
-                dev_pid=None,
-                owns_dev_process=False,
                 worktree_path=worktree,
                 repo_root=repo,
             )
@@ -191,8 +189,6 @@ class WorktreePolicyTests(unittest.TestCase):
                 created_at=time.time(),
                 last_seen=time.time(),
                 context_line=None,
-                dev_pid=None,
-                owns_dev_process=False,
                 worktree_path=worktree,
                 repo_root=repo,
             )
@@ -209,8 +205,6 @@ class WorktreePolicyTests(unittest.TestCase):
             created_at=time.time(),
             last_seen=time.time(),
             context_line=None,
-            dev_pid=None,
-            owns_dev_process=False,
         )
         output = backend._format_killall([session])
         self.assertIn("https://example/preview/5175", output)
@@ -237,6 +231,20 @@ class ConfigValidationTests(unittest.TestCase):
                 {"tailscale_https_port": 0},
                 config_path=Path("takopi.toml"),
             )
+
+    def test_rejects_removed_dev_server_settings(self) -> None:
+        cases = [
+            {"dev_command": "pnpm dev"},
+            {"auto_start": True},
+            {"env": {"NODE_ENV": "development"}},
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ConfigError):
+                    backend.PreviewConfig.from_config(
+                        payload,
+                        config_path=Path("takopi.toml"),
+                    )
 
 
 class PreviewParsingTests(unittest.TestCase):
@@ -296,7 +304,7 @@ class TailscaleSessionTests(unittest.TestCase):
     def test_start_clears_tailscale_conflict(self) -> None:
         manager = backend.PreviewManager()
         config = backend.PreviewConfig.from_config(
-            {"provider": "tailscale", "auto_start": False},
+            {"provider": "tailscale"},
             config_path=Path("takopi.toml"),
         )
         calls = {"off": 0, "on": 0}

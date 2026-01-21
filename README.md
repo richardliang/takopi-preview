@@ -1,15 +1,14 @@
 # takopi-preview
 
-preview command plugin for takopi. starts a dev server (optional), exposes it
-via `tailscale serve`, and tracks preview sessions by project/worktree context.
+preview command plugin for takopi. exposes existing local ports via
+`tailscale serve`, and tracks preview sessions by project/worktree context.
 
 published as the `takopi-preview` package. the command id is `preview`.
 
 ## features
 
 - `/preview` commands to start, list, stop, and clean up previews
-- per-project overrides for ports and dev commands
-- optional dev server auto-start with `{port}` substitution
+- per-project overrides for ports
 - session registry with ttl expiration
 - allowlist support for sensitive commands (like `killall`)
 
@@ -19,8 +18,8 @@ published as the `takopi-preview` package. the command id is `preview`.
 - takopi >= 0.20
 - provider tooling:
   - tailscale installed and authenticated on the host (`tailscale up`)
-- dev server binds to 127.0.0.1 (tunnels proxy locally)
-- security groups should not expose the dev server port publicly
+- the service you want to share binds to 127.0.0.1 (tunnels proxy locally)
+- security groups should not expose the local service port publicly
 
 ## install
 
@@ -54,46 +53,28 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 [plugins.preview]
 provider = "tailscale"
 default_port = 3000
-dev_command = "pnpm dev -- --host 127.0.0.1 --port {port}"
-auto_start = true
 ttl_minutes = 120
 path_prefix = "/preview"
 tailscale_https_port = 443
 allowed_user_ids = [123456789]
-
-# optional env injection for the dev server
-[plugins.preview.env]
-NODE_ENV = "development"
-
-# advanced overrides
 local_host = "127.0.0.1"
-path_prefix = "/preview"
-tailscale_https_port = 443
-
-# tailscale-specific
 tailscale_bin = "tailscale"
 
 # per-project overrides (Takopi project tables are strict, so use plugins.preview.projects)
 [plugins.preview.projects.myapp]
 port = 5173
-dev_command = "npm run dev -- --host 127.0.0.1 --port {port}"
 ```
 
 notes:
 
 - `provider = "tailscale"` uses tailnet-only urls from `tailscale serve`.
-- `dev_command` may include `{port}`; it will be substituted at runtime.
-- `dev_command` is required when `auto_start = true`. set `auto_start = false` to manage the dev server yourself.
-- Inline `--dev`/`--` overrides enable auto-start for that run; use `--no-start` to force manual mode.
-- To require an explicit command each run, omit `dev_command` and set `auto_start = false`, then pass `--dev` or `--`.
+- preview only configures tailscale serve; start your dev server separately.
 - `ttl_minutes = 0` disables expiration.
 - empty `allowed_user_ids` means no allowlist enforcement.
 
 ## commands
 
 - `/preview start [port]`: start a preview for the current context
-- `/preview start [port] --dev "<command>"`: override the dev command for this run
-- `/preview start [port] -- <command>`: shorthand for an inline dev command
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
@@ -103,14 +84,15 @@ notes:
 
 1. choose a context: `/myapp @feat/login` or reply in an existing thread.
    previews only run in worktrees, so include a branch to create/use one.
-2. run `/preview start` (or `/preview start 5173`).
-3. open the returned url, for example:
+2. start your dev server in that worktree (ex: `pnpm dev -- --port 5173`).
+3. run `/preview start` (or `/preview start 5173`).
+4. open the returned url, for example:
 
 ```
 https://DEVICE.TAILNET.ts.net/preview/5173
 ```
 
-4. stop when done: `/preview stop` or `/preview stop 5173`.
+5. stop when done: `/preview stop` or `/preview stop 5173`.
 
 ## state and ttl
 
@@ -124,10 +106,6 @@ https://DEVICE.TAILNET.ts.net/preview/5173
   port (so `5173` maps to `https://host.ts.net:5173`). Set
   `tailscale_https_port = 443` to force the default HTTPS port.
 
-dev server logs (when auto-started) are written to:
-
-- `~/.takopi/state/preview-logs/<session>.log`
-
 `ttl_minutes` controls automatic expiration for previews started by this takopi
 process; expired sessions are cleaned up on the next command invocation.
 worktrees that are pruned or deleted are also cleaned up on the next command.
@@ -137,10 +115,11 @@ takopi shutdown stops all previews.
 
 - missing tailscale: follow the install docs and run `tailscale up`.
 - serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
-- port already in use: when auto-starting, takopi will try to stop listeners on
-  that port; if it is still busy, run `/preview list` or pick a new port.
+- preview already active: if a port is already served, takopi will stop the
+  existing serve entry before re-enabling it.
+- service not reachable: ensure your dev server is running and bound to
+  `local_host` (default `127.0.0.1`).
 - not in a worktree: include a branch (ex: `/myapp @feat/foo`) to create/use a worktree.
-- dev server failures: the error includes log tail + log path.
 
 ## spec alignment
 
