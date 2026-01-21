@@ -308,8 +308,29 @@ class CloudflareSessionTests(unittest.TestCase):
         )
         manager._sessions = {5173: alive, 5174: dead}
 
-        sessions = asyncio.run(manager.list_sessions(config=config))
+        original = backend._cloudflared_list_ports
+        backend._cloudflared_list_ports = lambda _config: {}
+        try:
+            sessions = asyncio.run(manager.list_sessions(config=config))
+        finally:
+            backend._cloudflared_list_ports = original
         self.assertEqual([session.session_id for session in sessions], ["sess-live"])
+
+    def test_list_sessions_includes_external_cloudflared(self) -> None:
+        manager = backend.PreviewManager()
+        config = backend.PreviewConfig.from_config(
+            {"provider": "cloudflare"},
+            config_path=Path("takopi.toml"),
+        )
+        original = backend._cloudflared_list_ports
+        backend._cloudflared_list_ports = lambda _config: {5179: 4242}
+        try:
+            sessions = asyncio.run(manager.list_sessions(config=config))
+        finally:
+            backend._cloudflared_list_ports = original
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].port, 5179)
+        self.assertEqual(sessions[0].tunnel_pid, 4242)
 
     def test_extract_ports_from_text(self) -> None:
         text = "active /preview/3000 and https://host/preview/5173/test"
