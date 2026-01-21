@@ -39,6 +39,9 @@ PATH_PREFIX = "/preview"
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
 CLOUDFLARED_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 LISTEN_PID_RE = re.compile(r"pid=(\d+)")
+LOCAL_PROXY_PORT_RE = re.compile(
+    r"http://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,7 @@ class PreviewConfig:
     cloudflared_timeout_seconds: int
     local_host: str
     logs_dir: Path
+    path_prefix: str
 
     @classmethod
     def from_config(cls, config: object, *, config_path: Path) -> "PreviewConfig":
@@ -134,6 +138,9 @@ class PreviewConfig:
         local_host = (
             _optional_str(config, "local_host", config_path=config_path) or "127.0.0.1"
         )
+        path_prefix = _normalize_path_prefix(
+            _optional_str(config, "path_prefix", config_path=config_path) or PATH_PREFIX
+        )
 
         state_dir = config_path.parent / "state"
         logs_dir = state_dir / LOGS_DIRNAME
@@ -152,6 +159,7 @@ class PreviewConfig:
             cloudflared_timeout_seconds=cloudflared_timeout,
             local_host=local_host,
             logs_dir=logs_dir,
+            path_prefix=path_prefix,
         )
 
 
@@ -955,6 +963,17 @@ def _split_flag(token: str) -> tuple[str, str | None]:
     return token, None
 
 
+def _normalize_path_prefix(prefix: str) -> str:
+    trimmed = prefix.strip()
+    if not trimmed:
+        return PATH_PREFIX
+    if not trimmed.startswith("/"):
+        trimmed = f"/{trimmed}"
+    if trimmed != "/" and trimmed.endswith("/"):
+        trimmed = trimmed.rstrip("/")
+    return trimmed
+
+
 def _override_config(
     config: PreviewConfig,
     *,
@@ -1199,7 +1218,7 @@ def _cloudflared_list_ports(config: PreviewConfig) -> dict[int, int]:
         url = _extract_cloudflared_url_arg(tokens)
         if not url:
             continue
-        port = _parse_cloudflared_target_port(url, allowed_hosts)
+        port = _parse_local_target_port(url, allowed_hosts)
         if port is None:
             continue
         try:
@@ -1219,7 +1238,7 @@ def _extract_cloudflared_url_arg(tokens: list[str]) -> str | None:
     return None
 
 
-def _parse_cloudflared_target_port(
+def _parse_local_target_port(
     value: str, allowed_hosts: set[str]
 ) -> int | None:
     if not value:
@@ -1241,7 +1260,7 @@ def _parse_cloudflared_target_port(
 def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
     target = f"http://{config.local_host}:{port}"
-    path = _build_path(port)
+    path = _build_path(config, port)
     cmd = [
         config.tailscale_bin,
         "serve",
@@ -1265,7 +1284,7 @@ def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
 
 def _tailscale_http_off(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
-    path = _build_path(port)
+    path = _build_path(config, port)
     cmd = [
         config.tailscale_bin,
         "serve",
@@ -1327,6 +1346,11 @@ def _extract_preview_ports_from_text(text: str) -> set[int]:
             ports.add(int(match.group(1)))
         except ValueError:
             continue
+    for match in LOCAL_PROXY_PORT_RE.finditer(text):
+        try:
+            ports.add(int(match.group(1)))
+        except ValueError:
+            continue
     return ports
 
 
@@ -1344,6 +1368,42 @@ def _extract_preview_ports(payload: Any) -> set[int]:
                 visit(item)
         elif isinstance(value, str):
             ports.update(_extract_preview_ports_from_text(value))
+
+    visit(payload)
+    return ports
+
+
+def _extract_tailscale_ports(payload: Any, config: PreviewConfig) -> set[int]:
+    ports: set[int] = set()
+    prefix = config.path_prefix
+    allowed_hosts = {config.local_host, "localhost", "127.0.0.1", "0.0.0.0"}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            handlers = value.get("Handlers")
+            if isinstance(handlers, dict):
+                for path, handler in handlers.items():
+                    if not isinstance(path, str):
+                        continue
+                    if prefix in {"/", ""}:
+                        if path != "/":
+                            continue
+                    else:
+                        if not path.startswith(f"{prefix}/"):
+                            continue
+                    if not isinstance(handler, dict):
+                        continue
+                    proxy = handler.get("Proxy")
+                    if not isinstance(proxy, str):
+                        continue
+                    port = _parse_local_target_port(proxy, allowed_hosts)
+                    if port is not None:
+                        ports.add(port)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
 
     visit(payload)
     return ports
@@ -1369,6 +1429,9 @@ def _tailscale_list_ports(config: PreviewConfig) -> set[int]:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
             return _extract_preview_ports_from_text(result.stdout)
+        ports = _extract_tailscale_ports(payload, config)
+        if ports:
+            return ports
         return _extract_preview_ports(payload)
 
     message = result.stderr.strip() or result.stdout.strip()
@@ -1388,7 +1451,10 @@ def _build_url(*, config: PreviewConfig, port: int) -> str | None:
     dns = _get_dns_name(config)
     if dns is None:
         return None
-    return f"https://{dns}{_build_path(port)}"
+    path = _build_path(config, port)
+    if path == "/":
+        return f"https://{dns}"
+    return f"https://{dns}{path}"
 
 
 def _get_dns_name(config: PreviewConfig) -> str | None:
@@ -1555,8 +1621,11 @@ def _context_branch(context: object | None) -> str | None:
     return None
 
 
-def _build_path(port: int) -> str:
-    return f"{PATH_PREFIX}/{port}"
+def _build_path(config: PreviewConfig, port: int) -> str:
+    prefix = config.path_prefix
+    if prefix in {"", "/"}:
+        return "/"
+    return f"{prefix}/{port}"
 
 
 def _slugify(value: str) -> str:
