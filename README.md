@@ -39,7 +39,7 @@ pip install takopi-transport-slack takopi-preview
 ## setup
 
 1. install tailscale and authenticate (`tailscale up`).
-2. enable magicdns so `DEVICE.TAILNET.ts.net` resolves.
+2. enable magicdns so `DEVICE.TAILNET.ts.net` resolves. (https://tailscale.com)
 3. run takopi with your transport (slack or telegram) as usual.
 
 ## configuration
@@ -69,6 +69,8 @@ notes:
 
 - `provider = "tailscale"` uses tailnet-only urls from `tailscale serve`.
 - preview only configures tailscale serve; start your dev server separately.
+- takopi-preview is a command backend plugin that registers `/preview` and
+  manages `tailscale serve` entries based on takopi context/worktrees.
 - `ttl_minutes = 0` disables expiration.
 - empty `allowed_user_ids` means no allowlist enforcement.
 
@@ -93,6 +95,57 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 ```
 
 5. stop when done: `/preview stop` or `/preview stop 5173`.
+
+## common setups
+
+### vite / web apps
+
+Allow tailnet hosts and bind to localhost:
+
+```ts
+server: {
+  host: "127.0.0.1",
+  port: 5173,
+  allowedHosts: [".ts.net"],
+},
+```
+
+Start the dev server, then run `/preview start 5173`.
+
+### react native (metro)
+
+Metro expects requests at the root path, so use `path_prefix = "/"` and a
+dedicated HTTPS port for the Metro port (example: 8081).
+
+`metro.config.js` example:
+
+```js
+const config = getDefaultConfig(__dirname);
+const metroPort = Number(process.env.METRO_PORT || 8081);
+config.server = {
+  ...config.server,
+  port: metroPort,
+};
+module.exports = config;
+```
+
+Start Metro bound to localhost:
+
+```sh
+METRO_PORT=8081 bun start:dev -- --host localhost --port 8081
+```
+
+Expose it over tailnet:
+
+```
+/preview start 8081
+```
+
+On devices, set the dev server host/port to `HOST.TAILNET.ts.net:8081` in the
+React Native dev menu.
+
+If your dev client cannot use HTTPS, skip takopi-preview and connect directly
+to the tailnet IP by running Metro with `--host 0.0.0.0`.
 
 ## state and ttl
 
