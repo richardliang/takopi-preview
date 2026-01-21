@@ -12,7 +12,7 @@ published as the `takopi-preview` package. the command id is `preview`.
 - tailnet-only urls (no public ingress) with `tailscale serve`
 - per-project overrides for ports and dev commands
 - optional dev server auto-start with `{port}` substitution
-- session registry with ttl expiration and state recovery
+- session registry with ttl expiration
 - allowlist support for sensitive commands (like `killall`)
 
 ## requirements
@@ -96,6 +96,7 @@ notes:
 ## workflow
 
 1. choose a context: `/myapp @feat/login` or reply in an existing thread.
+   previews only run in worktrees, so include a branch to create/use one.
 2. run `/preview start` (or `/preview start 5173`).
 3. open the returned url, for example:
 
@@ -107,22 +108,23 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 
 ## state and ttl
 
-sessions are stored in memory and persisted to:
-
-- `~/.takopi/state/preview.json`
+sessions are derived from `tailscale serve status`; no preview state file is written.
 
 dev server logs (when auto-started) are written to:
 
 - `~/.takopi/state/preview-logs/<session>.log`
 
-`ttl_minutes` controls automatic expiration; expired sessions are cleaned up
-on the next command invocation.
+`ttl_minutes` controls automatic expiration for previews started by this takopi
+process; expired sessions are cleaned up on the next command invocation.
+worktrees that are pruned or deleted are also cleaned up on the next command.
+takopi shutdown stops all previews.
 
 ## errors
 
 - missing tailscale: follow the install docs and run `tailscale up`.
 - serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
 - port already in use: run `/preview list` or pick a new port.
+- not in a worktree: include a branch (ex: `/myapp @feat/foo`) to create/use a worktree.
 - dev server failures: the error includes log tail + log path.
 
 ## spec alignment
@@ -133,7 +135,7 @@ this implementation follows the webapp preview workflow spec:
 - [x] config in `[plugins.preview]` with per-project overrides
 - [x] tailscale serve + dns from `tailscale status --json`
 - [x] tailnet-only https urls
-- [x] in-memory registry + state file under `~/.takopi/state/preview.json`
+- [x] tailscale-native serve registry (no state file)
 - [x] ttl-based expiration (`ttl_minutes`)
 - [x] allowlist enforcement via `allowed_user_ids`
 

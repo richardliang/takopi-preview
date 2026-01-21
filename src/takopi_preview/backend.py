@@ -4,6 +4,7 @@ import atexit
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -20,7 +21,7 @@ from takopi.api import (
     HOME_CONFIG_PATH,
     get_logger,
 )
-from takopi.utils.json_state import atomic_write_json
+from takopi.utils.git import git_stdout, resolve_main_worktree_root
 
 logger = get_logger(__name__)
 
@@ -28,9 +29,9 @@ SAFE_PORT_MIN = 1024
 SAFE_PORT_MAX = 65535
 DEFAULT_TTL_MINUTES = 120
 DEFAULT_PROVIDER = "tailscale"
-STATE_FILENAME = "preview.json"
 LOGS_DIRNAME = "preview-logs"
 PATH_PREFIX = "/preview"
+_PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +45,6 @@ class PreviewConfig:
     env: dict[str, str]
     tailscale_bin: str
     local_host: str
-    state_path: Path
     logs_dir: Path
 
     @classmethod
@@ -105,7 +105,6 @@ class PreviewConfig:
         )
 
         state_dir = config_path.parent / "state"
-        state_path = state_dir / STATE_FILENAME
         logs_dir = state_dir / LOGS_DIRNAME
 
         return cls(
@@ -118,7 +117,6 @@ class PreviewConfig:
             env=env,
             tailscale_bin=tailscale_bin,
             local_host=local_host,
-            state_path=state_path,
             logs_dir=logs_dir,
         )
 
@@ -137,53 +135,29 @@ class PreviewSession:
     dev_pid: int | None
     tunnel_pid: int | None
     owns_dev_process: bool
+    worktree_path: Path | None = None
+    repo_root: Path | None = None
     dev_process: subprocess.Popen[str] | None = None
     log_path: Path | None = None
 
     def touch(self, now: float | None = None) -> None:
         self.last_seen = now or time.time()
 
-    def to_state(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "project": self.project,
-            "branch": self.branch,
-            "port": self.port,
-            "url": self.url,
-            "provider": self.provider,
-            "created_at": self.created_at,
-            "last_seen": self.last_seen,
-            "context_line": self.context_line,
-            "dev_pid": self.dev_pid,
-            "tunnel_pid": self.tunnel_pid,
-            "owns_dev_process": self.owns_dev_process,
-            "log_path": str(self.log_path) if self.log_path else None,
-        }
-
 
 class PreviewManager:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._sessions: dict[int, PreviewSession] = {}
-        self._state_path: Path | None = None
-        self._loaded = False
         self._last_config: PreviewConfig | None = None
         self._expiry_task: asyncio.Task[None] | None = None
 
-    async def ensure_loaded(self, config: PreviewConfig) -> None:
-        async with self._lock:
-            self._last_config = config
-            if self._loaded and self._state_path == config.state_path:
-                return
-            self._state_path = config.state_path
-            self._sessions = {session.port: session for session in _load_state(config)}
-            self._loaded = True
+    def record_config(self, config: PreviewConfig) -> None:
+        self._last_config = config
 
     async def expire_stale(self, config: PreviewConfig) -> list[PreviewSession]:
         if config.ttl_minutes <= 0:
             return []
-
-        await self.ensure_loaded(config)
+        self._last_config = config
         now = time.time()
         ttl_seconds = config.ttl_minutes * 60
 
@@ -202,9 +176,6 @@ class PreviewManager:
                 config=config,
                 session=session,
             )
-
-        if expired:
-            await self._persist_state(config)
         return expired
 
     async def start(
@@ -215,13 +186,16 @@ class PreviewManager:
         context_line: str | None,
         context: object | None,
         cwd: Path | None,
+        worktree_path: Path | None,
+        repo_root: Path | None,
     ) -> PreviewSession:
-        await self.ensure_loaded(config)
+        self._last_config = config
 
         _validate_port(port)
 
+        active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
         async with self._lock:
-            if port in self._sessions:
+            if port in self._sessions or port in active_ports:
                 raise ConfigError(
                     f"Preview already active on port {port}. Try /preview list."
                 )
@@ -275,18 +249,18 @@ class PreviewManager:
             dev_pid=dev_process.pid if dev_process is not None else None,
             tunnel_pid=None,
             owns_dev_process=owns_dev_process,
+            worktree_path=worktree_path,
+            repo_root=repo_root,
             dev_process=dev_process,
             log_path=log_path,
         )
 
         async with self._lock:
             self._sessions[port] = session
-
-        await self._persist_state(config)
         return session
 
     async def stop(self, *, config: PreviewConfig, session: PreviewSession) -> PreviewSession:
-        await self.ensure_loaded(config)
+        self._last_config = config
 
         async with self._lock:
             self._sessions.pop(session.port, None)
@@ -296,14 +270,20 @@ class PreviewManager:
             config=config,
             session=session,
         )
-        await self._persist_state(config)
         return session
 
     async def stop_all(self, *, config: PreviewConfig) -> list[PreviewSession]:
-        await self.ensure_loaded(config)
-
+        self._last_config = config
+        ports = await asyncio.to_thread(_tailscale_list_ports, config)
+        now = time.time()
         async with self._lock:
-            sessions = list(self._sessions.values())
+            sessions: list[PreviewSession] = []
+            for port in ports:
+                session = self._sessions.pop(port, None)
+                if session is None:
+                    session = _external_session(config=config, port=port, now=now)
+                sessions.append(session)
+            sessions.extend(self._sessions.values())
             self._sessions.clear()
 
         for session in sessions:
@@ -312,20 +292,21 @@ class PreviewManager:
                 config=config,
                 session=session,
             )
-
-        await self._persist_state(config)
         return sessions
 
     async def list_sessions(self, *, config: PreviewConfig) -> list[PreviewSession]:
-        await self.ensure_loaded(config)
-
+        self._last_config = config
+        ports = await asyncio.to_thread(_tailscale_list_ports, config)
+        now = time.time()
+        sessions: list[PreviewSession] = []
         async with self._lock:
-            sessions = list(self._sessions.values())
-            now = time.time()
-            for session in sessions:
-                session.touch(now)
-
-        await self._persist_state(config)
+            for port in ports:
+                session = self._sessions.get(port)
+                if session is None:
+                    session = _external_session(config=config, port=port, now=now)
+                else:
+                    session.touch(now)
+                sessions.append(session)
         return sessions
 
     async def find_session(
@@ -335,10 +316,7 @@ class PreviewManager:
         arg: str | None,
         context: object | None,
     ) -> PreviewSession:
-        await self.ensure_loaded(config)
-
-        async with self._lock:
-            sessions = list(self._sessions.values())
+        sessions = await self.list_sessions(config=config)
 
         if not sessions:
             raise ConfigError("No active previews.")
@@ -349,11 +327,6 @@ class PreviewManager:
         if arg:
             return _find_by_id(sessions, arg)
         return _find_by_context(sessions, context)
-
-    async def _persist_state(self, config: PreviewConfig) -> None:
-        async with self._lock:
-            sessions = list(self._sessions.values())
-        _persist_state(config, sessions)
 
     async def ensure_expiry_loop(self, config: PreviewConfig) -> None:
         if config.ttl_minutes <= 0:
@@ -380,7 +353,31 @@ class PreviewManager:
         self._sessions.clear()
         for session in sessions:
             _stop_session(config=config, session=session)
-        _persist_state(config, [])
+
+    async def expire_pruned(self, config: PreviewConfig) -> list[PreviewSession]:
+        self._last_config = config
+
+        async with self._lock:
+            sessions = list(self._sessions.values())
+
+        if not sessions:
+            return []
+
+        pruned = await asyncio.to_thread(_find_pruned_sessions, sessions)
+        if not pruned:
+            return []
+
+        async with self._lock:
+            for session in pruned:
+                self._sessions.pop(session.port, None)
+
+        for session in pruned:
+            await asyncio.to_thread(
+                _stop_session,
+                config=config,
+                session=session,
+            )
+        return pruned
 
 
 MANAGER = PreviewManager()
@@ -413,8 +410,10 @@ class PreviewCommand:
         if not _is_user_allowed(ctx, config):
             return CommandResult(text="preview error: user not allowed")
 
+        MANAGER.record_config(config)
         await MANAGER.ensure_expiry_loop(config)
         await MANAGER.expire_stale(config)
+        await MANAGER.expire_pruned(config)
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
@@ -425,12 +424,15 @@ class PreviewCommand:
                     dev_command=dev_command,
                     auto_start=auto_start,
                 )
+            worktree_path, repo_root = _require_worktree(cwd)
             session = await MANAGER.start(
                 config=config,
                 port=port,
                 context_line=context_line,
                 context=context,
                 cwd=cwd,
+                worktree_path=worktree_path,
+                repo_root=repo_root,
             )
             dev_status = _describe_dev_status(session=session, config=config)
             return CommandResult(text=_format_started(session, dev_status=dev_status))
@@ -623,6 +625,24 @@ def _validate_port(port: int) -> None:
         raise ConfigError(
             f"Port {port} is out of range ({SAFE_PORT_MIN}-{SAFE_PORT_MAX})."
         )
+
+
+def _require_worktree(cwd: Path | None) -> tuple[Path, Path]:
+    if cwd is None:
+        raise ConfigError("preview start requires a worktree; specify a project/branch.")
+    top = git_stdout(
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
+    )
+    if not top:
+        raise ConfigError("preview start requires a git worktree.")
+    worktree_path = Path(top).resolve(strict=False)
+    repo_root = resolve_main_worktree_root(worktree_path)
+    if repo_root is None:
+        raise ConfigError("preview start requires a git worktree.")
+    repo_root = repo_root.resolve(strict=False)
+    if worktree_path == repo_root:
+        raise ConfigError("preview start requires a worktree (not the main repo).")
+    return worktree_path, repo_root
 
 
 def _parse_port(arg: str | None) -> int | None:
@@ -859,6 +879,70 @@ def _run_tailscale(
         _run(fallback, log_event)
 
 
+def _extract_preview_ports_from_text(text: str) -> set[int]:
+    ports: set[int] = set()
+    for match in _PREVIEW_PORT_RE.finditer(text):
+        try:
+            ports.add(int(match.group(1)))
+        except ValueError:
+            continue
+    return ports
+
+
+def _extract_preview_ports(payload: Any) -> set[int]:
+    ports: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(key, str):
+                    ports.update(_extract_preview_ports_from_text(key))
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, str):
+            ports.update(_extract_preview_ports_from_text(value))
+
+    visit(payload)
+    return ports
+
+
+def _should_fallback_serve_status(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "unknown flag" in lowered
+        or "unknown argument" in lowered
+        or "unknown command" in lowered
+        or "unknown subcommand" in lowered
+        or "invalid argument format" in lowered
+    )
+
+
+def _tailscale_list_ports(config: PreviewConfig) -> set[int]:
+    _ensure_tailscale(config)
+    cmd = [config.tailscale_bin, "serve", "status", "--json"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return _extract_preview_ports_from_text(result.stdout)
+        return _extract_preview_ports(payload)
+
+    message = result.stderr.strip() or result.stdout.strip()
+    if _should_fallback_serve_status(message):
+        fallback = [config.tailscale_bin, "serve", "status"]
+        result = subprocess.run(fallback, capture_output=True, text=True)
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip()
+            raise ConfigError(message or "tailscale command failed")
+        output = "\n".join([result.stdout, result.stderr]).strip()
+        return _extract_preview_ports_from_text(output)
+
+    raise ConfigError(message or "tailscale command failed")
+
+
 def _build_url(*, config: PreviewConfig, port: int) -> str | None:
     dns = _get_dns_name(config)
     if dns is None:
@@ -883,6 +967,25 @@ def _get_dns_name(config: PreviewConfig) -> str | None:
     if isinstance(host, str) and isinstance(suffix, str):
         return f"{host}.{suffix}"
     return None
+
+
+def _external_session(
+    *, config: PreviewConfig, port: int, now: float
+) -> PreviewSession:
+    return PreviewSession(
+        session_id=str(port),
+        project=None,
+        branch=None,
+        port=port,
+        url=_build_url(config=config, port=port),
+        provider=config.provider,
+        created_at=0.0,
+        last_seen=now,
+        context_line=None,
+        dev_pid=None,
+        tunnel_pid=None,
+        owns_dev_process=False,
+    )
 
 
 def _stop_session(*, config: PreviewConfig, session: PreviewSession) -> None:
@@ -1025,111 +1128,47 @@ def _find_by_context(
     raise ConfigError("Specify a port or id to stop.")
 
 
-def _load_state(config: PreviewConfig) -> list[PreviewSession]:
-    path = config.state_path
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        logger.warning("preview.state_read_failed", error=str(exc))
-        return []
-    except json.JSONDecodeError as exc:
-        logger.warning("preview.state_parse_failed", error=str(exc))
-        return []
+def _list_worktree_paths(repo_root: Path) -> set[Path] | None:
+    output = git_stdout(["worktree", "list", "--porcelain"], cwd=repo_root)
+    if not output:
+        return None
+    paths: set[Path] = set()
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            raw = line[len("worktree ") :].strip()
+            if raw:
+                paths.add(Path(raw).resolve(strict=False))
+    return paths
 
-    if not isinstance(raw, dict):
-        return []
-    sessions = raw.get("sessions")
-    if not isinstance(sessions, list):
-        return []
 
-    recovered: list[PreviewSession] = []
-    for item in sessions:
-        session = _parse_state_session(item)
-        if session is None:
+def _find_pruned_sessions(sessions: list[PreviewSession]) -> list[PreviewSession]:
+    pruned: list[PreviewSession] = []
+    worktree_cache: dict[Path, set[Path] | None] = {}
+    for session in sessions:
+        worktree_path = session.worktree_path
+        if worktree_path is None:
             continue
-        recovered.append(session)
-
-    return recovered
-
-
-def _parse_state_session(payload: Any) -> PreviewSession | None:
-    if not isinstance(payload, dict):
-        return None
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        return None
-
-    port = _coerce_int(payload.get("port"))
-    if port is None:
-        return None
-
-    project = payload.get("project")
-    if not isinstance(project, str):
-        project = None
-    branch = payload.get("branch")
-    if not isinstance(branch, str):
-        branch = None
-
-    url = payload.get("url")
-    if not isinstance(url, str):
-        url = None
-
-    provider = payload.get("provider")
-    if not isinstance(provider, str) or not provider:
-        provider = DEFAULT_PROVIDER
-
-    created_at = payload.get("created_at")
-    if not isinstance(created_at, (int, float)):
-        created_at = time.time()
-
-    last_seen = payload.get("last_seen")
-    if not isinstance(last_seen, (int, float)):
-        last_seen = created_at
-
-    context_line = payload.get("context_line")
-    if not isinstance(context_line, str):
-        context_line = None
-
-    dev_pid = _coerce_int(payload.get("dev_pid"))
-    tunnel_pid = _coerce_int(payload.get("tunnel_pid"))
-    owns_dev_process = bool(payload.get("owns_dev_process", False))
-
-    log_path = payload.get("log_path")
-    if isinstance(log_path, str) and log_path:
-        log_path_obj = Path(log_path)
-    else:
-        log_path_obj = None
-
-    return PreviewSession(
-        session_id=session_id,
-        project=project,
-        branch=branch,
-        port=port,
-        url=url,
-        provider=provider,
-        created_at=float(created_at),
-        last_seen=float(last_seen),
-        context_line=context_line,
-        dev_pid=dev_pid,
-        tunnel_pid=tunnel_pid,
-        owns_dev_process=owns_dev_process,
-        dev_process=None,
-        log_path=log_path_obj,
-    )
-
-
-def _persist_state(config: PreviewConfig, sessions: list[PreviewSession]) -> None:
-    payload = {
-        "version": 1,
-        "updated_at": time.time(),
-        "sessions": [session.to_state() for session in sessions],
-    }
-    try:
-        atomic_write_json(config.state_path, payload)
-    except OSError as exc:
-        logger.warning("preview.state_write_failed", error=str(exc))
+        if not worktree_path.exists():
+            pruned.append(session)
+            continue
+        repo_root = session.repo_root or resolve_main_worktree_root(worktree_path)
+        if repo_root is None:
+            continue
+        repo_root = repo_root.resolve(strict=False)
+        worktree_path_resolved = worktree_path.resolve(strict=False)
+        if worktree_path_resolved == repo_root:
+            pruned.append(session)
+            continue
+        if repo_root in worktree_cache:
+            worktrees = worktree_cache[repo_root]
+        else:
+            worktrees = _list_worktree_paths(repo_root)
+            worktree_cache[repo_root] = worktrees
+        if worktrees is None:
+            continue
+        if worktree_path_resolved not in worktrees:
+            pruned.append(session)
+    return pruned
 
 
 def _format_started(
@@ -1161,14 +1200,18 @@ def _describe_dev_status(*, session: PreviewSession, config: PreviewConfig) -> s
 
 
 def _format_stopped(session: PreviewSession) -> str:
-    return f"Preview stopped on port {session.port}."
+    url = session.url or "(url unavailable)"
+    return f"Preview stopped on port {session.port}.\nURL: {url}"
 
 
 def _format_killall(sessions: list[PreviewSession]) -> str:
     if not sessions:
         return "No active previews."
-    ports = ", ".join(str(session.port) for session in sessions)
-    return f"Stopped previews on ports: {ports}."
+    lines = ["Stopped previews:"]
+    for session in sorted(sessions, key=lambda item: item.port):
+        url = session.url or "(url unavailable)"
+        lines.append(f"- port {session.port} | {url}")
+    return "\n".join(lines)
 
 
 def _format_list(sessions: list[PreviewSession]) -> str:
@@ -1186,6 +1229,8 @@ def _format_list(sessions: list[PreviewSession]) -> str:
 
 
 def _format_age(started_at: float) -> str:
+    if started_at <= 0:
+        return "unknown"
     seconds = int(time.time() - started_at)
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
