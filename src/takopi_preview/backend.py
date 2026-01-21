@@ -38,6 +38,7 @@ LOGS_DIRNAME = "preview-logs"
 PATH_PREFIX = "/preview"
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
 CLOUDFLARED_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+LISTEN_PID_RE = re.compile(r"pid=(\d+)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,9 +185,43 @@ class PreviewManager:
         self._sessions: dict[int, PreviewSession] = {}
         self._last_config: PreviewConfig | None = None
         self._expiry_task: asyncio.Task[None] | None = None
+        self._cloudflare_cleaned = False
 
     def record_config(self, config: PreviewConfig) -> None:
         self._last_config = config
+
+    async def ensure_cloudflare_cleanup(self, config: PreviewConfig) -> None:
+        if config.provider != "cloudflare":
+            return
+        if self._cloudflare_cleaned:
+            return
+        self._cloudflare_cleaned = True
+
+        port_pids = await asyncio.to_thread(_cloudflared_list_ports, config)
+        if not port_pids:
+            return
+
+        now = time.time()
+        async with self._lock:
+            sessions: list[PreviewSession] = []
+            for port, pid in port_pids.items():
+                session = self._sessions.pop(port, None)
+                if session is None:
+                    session = _external_cloudflare_session(
+                        config=config, port=port, pid=pid, now=now
+                    )
+                else:
+                    if session.tunnel_pid is None:
+                        session.tunnel_pid = pid
+                sessions.append(session)
+
+        logger.info("preview.cloudflare_cleanup", count=len(sessions))
+        for session in sessions:
+            await asyncio.to_thread(
+                _stop_session,
+                config=config,
+                session=session,
+            )
 
     async def expire_stale(self, config: PreviewConfig) -> list[PreviewSession]:
         if config.ttl_minutes <= 0:
@@ -228,14 +263,28 @@ class PreviewManager:
         _validate_port(port)
 
         active_ports: set[int] = set()
+        cloudflared_ports: dict[int, int] = {}
         if config.provider == "tailscale":
             active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
         elif config.provider == "cloudflare":
-            active_ports = set(
-                (await asyncio.to_thread(_cloudflared_list_ports, config)).keys()
-            )
+            cloudflared_ports = await asyncio.to_thread(_cloudflared_list_ports, config)
+            active_ports = set(cloudflared_ports.keys())
         async with self._lock:
-            if port in self._sessions or port in active_ports:
+            in_sessions = port in self._sessions
+        if in_sessions or port in active_ports:
+            if config.provider == "cloudflare":
+                await self._clear_cloudflare_conflict(
+                    config=config,
+                    port=port,
+                    pid=cloudflared_ports.get(port),
+                )
+                cloudflared_ports = await asyncio.to_thread(
+                    _cloudflared_list_ports, config
+                )
+                active_ports = set(cloudflared_ports.keys())
+                async with self._lock:
+                    in_sessions = port in self._sessions
+            if in_sessions or port in active_ports:
                 raise ConfigError(
                     f"Preview already active on port {port}. Try /preview list."
                 )
@@ -247,9 +296,17 @@ class PreviewManager:
             if not config.dev_command:
                 raise ConfigError("preview.dev_command is required when auto_start=true")
             if not _is_port_available(config.local_host, port):
-                raise ConfigError(
-                    f"Port {port} is already in use. Try /preview list or another port."
-                )
+                killed = _kill_port_listeners(port)
+                if killed:
+                    logger.info(
+                        "preview.port_conflict_killed",
+                        port=port,
+                        pids=sorted(killed),
+                    )
+                if not _is_port_available(config.local_host, port):
+                    raise ConfigError(
+                        f"Port {port} is already in use. Try /preview list or another port."
+                    )
             dev_process, log_path = _start_dev_server(
                 command=config.dev_command,
                 port=port,
@@ -484,6 +541,27 @@ class PreviewManager:
             )
         return pruned
 
+    async def _clear_cloudflare_conflict(
+        self, *, config: PreviewConfig, port: int, pid: int | None
+    ) -> None:
+        now = time.time()
+        async with self._lock:
+            session = self._sessions.pop(port, None)
+        if session is None:
+            if pid is None:
+                return
+            session = _external_cloudflare_session(
+                config=config, port=port, pid=pid, now=now
+            )
+        else:
+            if session.tunnel_pid is None:
+                session.tunnel_pid = pid
+        await asyncio.to_thread(
+            _stop_session,
+            config=config,
+            session=session,
+        )
+
 
 MANAGER = PreviewManager()
 
@@ -515,6 +593,7 @@ class PreviewCommand:
         if not _is_user_allowed(ctx, config):
             return CommandResult(text="preview error: user not allowed")
 
+        await MANAGER.ensure_cloudflare_cleanup(config)
         MANAGER.record_config(config)
         await MANAGER.ensure_expiry_loop(config)
         await MANAGER.expire_stale(config)
@@ -881,6 +960,51 @@ def _is_port_available(host: str, port: int) -> bool:
         except OSError:
             return False
         return True
+
+
+def _listening_pids(port: int) -> set[int]:
+    commands = [
+        (["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-n", "-P"], _parse_lsof_pids),
+        (["ss", "-ltnp", f"sport = :{port}"], _parse_ss_pids),
+    ]
+    for cmd, parser in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            continue
+        if result.returncode != 0 or not result.stdout:
+            continue
+        pids = parser(result.stdout)
+        if pids:
+            return pids
+    return set()
+
+
+def _parse_lsof_pids(output: str) -> set[int]:
+    pids: set[int] = set()
+    lines = output.splitlines()
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if parts[1].isdigit():
+            pids.add(int(parts[1]))
+    return pids
+
+
+def _parse_ss_pids(output: str) -> set[int]:
+    pids: set[int] = set()
+    for line in output.splitlines():
+        for match in LISTEN_PID_RE.findall(line):
+            pids.add(int(match))
+    return pids
+
+
+def _kill_port_listeners(port: int) -> set[int]:
+    pids = _listening_pids(port)
+    for pid in pids:
+        _stop_pid(pid)
+    return pids
 
 
 def _start_dev_server(

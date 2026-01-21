@@ -122,6 +122,8 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 - tailscale: sessions are derived from `tailscale serve status`; no preview state file is written.
 - cloudflare: sessions are tracked in-process; list/killall will also scan for
   `cloudflared tunnel --url` processes (external URLs may be unavailable).
+- cloudflare: on the first preview command, takopi stops any existing
+  `cloudflared tunnel --url` processes to prevent stale sessions.
 
 dev server logs (when auto-started) are written to:
 
@@ -137,7 +139,8 @@ takopi shutdown stops all previews.
 - missing tailscale: follow the install docs and run `tailscale up`.
 - missing cloudflared: install cloudflared from the Cloudflare docs or GitHub releases.
 - serve disabled: enable serve for your tailnet (Tailscale admin UI) if you see the "Serve is not enabled" error.
-- port already in use: run `/preview list` or pick a new port.
+- port already in use: when auto-starting, takopi will try to stop listeners on
+  that port; if it is still busy, run `/preview list` or pick a new port.
 - not in a worktree: include a branch (ex: `/myapp @feat/foo`) to create/use a worktree.
 - dev server failures: the error includes log tail + log path.
 

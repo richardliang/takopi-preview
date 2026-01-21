@@ -332,6 +332,29 @@ class CloudflareSessionTests(unittest.TestCase):
         self.assertEqual(sessions[0].port, 5179)
         self.assertEqual(sessions[0].tunnel_pid, 4242)
 
+    def test_cloudflare_cleanup_runs_once(self) -> None:
+        manager = backend.PreviewManager()
+        config = backend.PreviewConfig.from_config(
+            {"provider": "cloudflare"},
+            config_path=Path("takopi.toml"),
+        )
+        calls: list[int] = []
+        original_list = backend._cloudflared_list_ports
+        original_stop = backend._stop_session
+        backend._cloudflared_list_ports = lambda _config: {5177: 111, 5178: 222}
+
+        def _stop_session_stub(*, config, session) -> None:
+            calls.append(session.port)
+
+        backend._stop_session = _stop_session_stub
+        try:
+            asyncio.run(manager.ensure_cloudflare_cleanup(config))
+            asyncio.run(manager.ensure_cloudflare_cleanup(config))
+        finally:
+            backend._cloudflared_list_ports = original_list
+            backend._stop_session = original_stop
+        self.assertEqual(sorted(calls), [5177, 5178])
+
     def test_extract_ports_from_text(self) -> None:
         text = "active /preview/3000 and https://host/preview/5173/test"
         ports = backend._extract_preview_ports_from_text(text)
