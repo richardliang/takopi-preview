@@ -6,11 +6,13 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import time
+import urllib.parse
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -228,6 +230,10 @@ class PreviewManager:
         active_ports: set[int] = set()
         if config.provider == "tailscale":
             active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
+        elif config.provider == "cloudflare":
+            active_ports = set(
+                (await asyncio.to_thread(_cloudflared_list_ports, config)).keys()
+            )
         async with self._lock:
             if port in self._sessions or port in active_ports:
                 raise ConfigError(
@@ -342,8 +348,20 @@ class PreviewManager:
                 )
             return sessions
 
+        port_pids = await asyncio.to_thread(_cloudflared_list_ports, config)
         async with self._lock:
-            sessions = list(self._sessions.values())
+            sessions = []
+            for port, pid in port_pids.items():
+                session = self._sessions.pop(port, None)
+                if session is None:
+                    session = _external_cloudflare_session(
+                        config=config, port=port, pid=pid, now=now
+                    )
+                else:
+                    if session.tunnel_pid is None:
+                        session.tunnel_pid = pid
+                sessions.append(session)
+            sessions.extend(self._sessions.values())
             self._sessions.clear()
 
         for session in sessions:
@@ -370,9 +388,25 @@ class PreviewManager:
                     sessions.append(session)
             return sessions
 
+        port_pids = await asyncio.to_thread(_cloudflared_list_ports, config)
         sessions: list[PreviewSession] = []
+        seen_ports: set[int] = set()
         async with self._lock:
+            for port, pid in port_pids.items():
+                seen_ports.add(port)
+                session = self._sessions.get(port)
+                if session is None:
+                    session = _external_cloudflare_session(
+                        config=config, port=port, pid=pid, now=now
+                    )
+                else:
+                    session.touch(now)
+                    if session.tunnel_pid is None:
+                        session.tunnel_pid = pid
+                sessions.append(session)
             for port, session in list(self._sessions.items()):
+                if port in seen_ports:
+                    continue
                 if not _tunnel_is_alive(session):
                     self._sessions.pop(port, None)
                     continue
@@ -992,6 +1026,75 @@ def _cloudflared_start(
     return process, url
 
 
+def _cloudflared_list_ports(config: PreviewConfig) -> dict[int, int]:
+    _ensure_cloudflared(config)
+    result = subprocess.run(
+        ["ps", "-eo", "pid,args"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise ConfigError(message or "cloudflared process listing failed")
+
+    allowed_hosts = {config.local_host, "localhost", "127.0.0.1", "0.0.0.0"}
+    ports: dict[int, int] = {}
+    for line in result.stdout.splitlines()[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid_str, cmd = line.split(None, 1)
+        except ValueError:
+            continue
+        if "cloudflared" not in cmd or "tunnel" not in cmd or "--url" not in cmd:
+            continue
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            continue
+        if "tunnel" not in tokens:
+            continue
+        url = _extract_cloudflared_url_arg(tokens)
+        if not url:
+            continue
+        port = _parse_cloudflared_target_port(url, allowed_hosts)
+        if port is None:
+            continue
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        ports[port] = pid
+    return ports
+
+
+def _extract_cloudflared_url_arg(tokens: list[str]) -> str | None:
+    for idx, token in enumerate(tokens):
+        if token == "--url" and idx + 1 < len(tokens):
+            return tokens[idx + 1]
+        if token.startswith("--url="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _parse_cloudflared_target_port(
+    value: str, allowed_hosts: set[str]
+) -> int | None:
+    if not value:
+        return None
+    if "://" not in value:
+        value = f"http://{value}"
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if host is None or host not in allowed_hosts:
+        return None
+    if parsed.port is None:
+        return None
+    return parsed.port
+
+
 def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
     target = f"http://{config.local_host}:{port}"
@@ -1179,6 +1282,26 @@ def _external_session(
         context_line=None,
         dev_pid=None,
         tunnel_pid=None,
+        owns_dev_process=False,
+        tunnel_process=None,
+    )
+
+
+def _external_cloudflare_session(
+    *, config: PreviewConfig, port: int, pid: int | None, now: float
+) -> PreviewSession:
+    return PreviewSession(
+        session_id=str(port),
+        project=None,
+        branch=None,
+        port=port,
+        url=None,
+        provider=config.provider,
+        created_at=0.0,
+        last_seen=now,
+        context_line=None,
+        dev_pid=None,
+        tunnel_pid=pid,
         owns_dev_process=False,
         tunnel_process=None,
     )

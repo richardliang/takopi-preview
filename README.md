@@ -120,7 +120,8 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 ## state and ttl
 
 - tailscale: sessions are derived from `tailscale serve status`; no preview state file is written.
-- cloudflare: sessions are tracked in-process; tunnels do not persist across restarts.
+- cloudflare: sessions are tracked in-process; list/killall will also scan for
+  `cloudflared tunnel --url` processes (external URLs may be unavailable).
 
 dev server logs (when auto-started) are written to:
 
