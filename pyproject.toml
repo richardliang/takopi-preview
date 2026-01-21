@@ -1,0 +1,31 @@
+[project]
+name = "takopi-preview"
+version = "0.1.14"
+description = "Tailscale preview command plugin for Takopi"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { file = "LICENSE" }
+keywords = ["takopi", "tailscale", "preview"]
+authors = [
+  { name = "ZKP2P" }
+]
+dependencies = [
+  "takopi>=0.20.0",
+]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://takopi.dev"
+
+[project.entry-points."takopi.command_backends"]
+preview = "takopi_preview.backend:BACKEND"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
