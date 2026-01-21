@@ -1,6 +1,6 @@
 [project]
 name = "takopi-preview"
-version = "0.1.10"
+version = "0.1.11"
 description = "Tailscale preview command plugin for Takopi"
 readme = "README.md"
 requires-python = ">=3.14"
