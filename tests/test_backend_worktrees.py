@@ -1,3 +1,4 @@
+import asyncio
 import types
 import subprocess
 import sys
@@ -218,6 +219,97 @@ class WorktreePolicyTests(unittest.TestCase):
         )
         output = backend._format_killall([session])
         self.assertIn("https://example/preview/5175", output)
+
+
+class CloudflareConfigTests(unittest.TestCase):
+    def test_cloudflare_defaults(self) -> None:
+        config = backend.PreviewConfig.from_config(
+            {"provider": "cloudflare"},
+            config_path=Path("takopi.toml"),
+        )
+        self.assertEqual(config.provider, "cloudflare")
+        self.assertEqual(config.cloudflared_bin, "cloudflared")
+        self.assertEqual(config.cloudflared_args, ("--no-autoupdate",))
+        self.assertEqual(
+            config.cloudflared_timeout_seconds,
+            backend.DEFAULT_CLOUDFLARED_TIMEOUT_SECONDS,
+        )
+
+    def test_cloudflare_args_override(self) -> None:
+        config = backend.PreviewConfig.from_config(
+            {
+                "provider": "cloudflare",
+                "cloudflared_args": ["--protocol", "http2"],
+                "cloudflared_timeout_seconds": 45,
+            },
+            config_path=Path("takopi.toml"),
+        )
+        self.assertEqual(config.cloudflared_args, ("--protocol", "http2"))
+        self.assertEqual(config.cloudflared_timeout_seconds, 45)
+
+    def test_cloudflare_invalid_timeout(self) -> None:
+        with self.assertRaises(ConfigError):
+            backend.PreviewConfig.from_config(
+                {"provider": "cloudflare", "cloudflared_timeout_seconds": 0},
+                config_path=Path("takopi.toml"),
+            )
+
+    def test_cloudflare_args_validation(self) -> None:
+        with self.assertRaises(ConfigError):
+            backend.PreviewConfig.from_config(
+                {"provider": "cloudflare", "cloudflared_args": ["", "ok"]},
+                config_path=Path("takopi.toml"),
+            )
+
+
+class CloudflareSessionTests(unittest.TestCase):
+    def test_list_sessions_prunes_dead_tunnels(self) -> None:
+        class _Proc:
+            def __init__(self, alive: bool) -> None:
+                self._alive = alive
+
+            def poll(self) -> int | None:
+                return None if self._alive else 1
+
+        manager = backend.PreviewManager()
+        config = backend.PreviewConfig.from_config(
+            {"provider": "cloudflare"},
+            config_path=Path("takopi.toml"),
+        )
+        alive = backend.PreviewSession(
+            session_id="sess-live",
+            project="proj",
+            branch="feat-live",
+            port=5173,
+            url="https://example.trycloudflare.com",
+            provider="cloudflare",
+            created_at=time.time(),
+            last_seen=time.time(),
+            context_line=None,
+            dev_pid=None,
+            tunnel_pid=None,
+            owns_dev_process=False,
+            tunnel_process=_Proc(True),
+        )
+        dead = backend.PreviewSession(
+            session_id="sess-dead",
+            project="proj",
+            branch="feat-dead",
+            port=5174,
+            url="https://example.trycloudflare.com",
+            provider="cloudflare",
+            created_at=time.time(),
+            last_seen=time.time(),
+            context_line=None,
+            dev_pid=None,
+            tunnel_pid=None,
+            owns_dev_process=False,
+            tunnel_process=_Proc(False),
+        )
+        manager._sessions = {5173: alive, 5174: dead}
+
+        sessions = asyncio.run(manager.list_sessions(config=config))
+        self.assertEqual([session.session_id for session in sessions], ["sess-live"])
 
     def test_extract_ports_from_text(self) -> None:
         text = "active /preview/3000 and https://host/preview/5173/test"

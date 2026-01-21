@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import re
+import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -29,14 +31,16 @@ SAFE_PORT_MIN = 1024
 SAFE_PORT_MAX = 65535
 DEFAULT_TTL_MINUTES = 120
 DEFAULT_PROVIDER = "tailscale"
+DEFAULT_CLOUDFLARED_TIMEOUT_SECONDS = 30
 LOGS_DIRNAME = "preview-logs"
 PATH_PREFIX = "/preview"
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
+CLOUDFLARED_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
-    provider: Literal["tailscale"]
+    provider: Literal["tailscale", "cloudflare"]
     default_port: int
     dev_command: str | None
     auto_start: bool
@@ -44,6 +48,9 @@ class PreviewConfig:
     allowed_user_ids: set[int] | None
     env: dict[str, str]
     tailscale_bin: str
+    cloudflared_bin: str
+    cloudflared_args: tuple[str, ...]
+    cloudflared_timeout_seconds: int
     local_host: str
     logs_dir: Path
 
@@ -58,10 +65,10 @@ class PreviewConfig:
 
         provider = _optional_str(config, "provider", config_path=config_path)
         provider = provider or DEFAULT_PROVIDER
-        if provider != "tailscale":
+        if provider not in {"tailscale", "cloudflare"}:
             raise ConfigError(
                 f"Invalid `preview.provider` in {config_path}; "
-                "only 'tailscale' is supported."
+                "expected 'tailscale' or 'cloudflare'."
             )
 
         default_port = _optional_int(config, "port", config_path=config_path)
@@ -100,6 +107,27 @@ class PreviewConfig:
         tailscale_bin = (
             _optional_str(config, "tailscale_bin", config_path=config_path) or "tailscale"
         )
+        cloudflared_bin = (
+            _optional_str(config, "cloudflared_bin", config_path=config_path)
+            or "cloudflared"
+        )
+        cloudflared_args = _optional_str_list(
+            config, "cloudflared_args", config_path=config_path
+        )
+        if cloudflared_args is None:
+            cloudflared_args = ("--no-autoupdate",)
+        else:
+            cloudflared_args = tuple(cloudflared_args)
+        cloudflared_timeout = _optional_int(
+            config, "cloudflared_timeout_seconds", config_path=config_path
+        )
+        if cloudflared_timeout is None:
+            cloudflared_timeout = DEFAULT_CLOUDFLARED_TIMEOUT_SECONDS
+        if cloudflared_timeout <= 0:
+            raise ConfigError(
+                f"Invalid `preview.cloudflared_timeout_seconds` in {config_path}; "
+                "expected a positive integer."
+            )
         local_host = (
             _optional_str(config, "local_host", config_path=config_path) or "127.0.0.1"
         )
@@ -108,7 +136,7 @@ class PreviewConfig:
         logs_dir = state_dir / LOGS_DIRNAME
 
         return cls(
-            provider="tailscale",
+            provider=provider,
             default_port=default_port,
             dev_command=dev_command,
             auto_start=auto_start,
@@ -116,6 +144,9 @@ class PreviewConfig:
             allowed_user_ids=allowed_user_ids,
             env=env,
             tailscale_bin=tailscale_bin,
+            cloudflared_bin=cloudflared_bin,
+            cloudflared_args=cloudflared_args,
+            cloudflared_timeout_seconds=cloudflared_timeout,
             local_host=local_host,
             logs_dir=logs_dir,
         )
@@ -137,6 +168,7 @@ class PreviewSession:
     owns_dev_process: bool
     worktree_path: Path | None = None
     repo_root: Path | None = None
+    tunnel_process: subprocess.Popen[str] | None = None
     dev_process: subprocess.Popen[str] | None = None
     log_path: Path | None = None
 
@@ -193,7 +225,9 @@ class PreviewManager:
 
         _validate_port(port)
 
-        active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
+        active_ports: set[int] = set()
+        if config.provider == "tailscale":
+            active_ports = await asyncio.to_thread(_tailscale_list_ports, config)
         async with self._lock:
             if port in self._sessions or port in active_ports:
                 raise ConfigError(
@@ -225,12 +259,24 @@ class PreviewManager:
                 _stop_process(dev_process)
                 raise
 
+        tunnel_process = None
+        tunnel_pid = None
+        url = None
         try:
-            await asyncio.to_thread(
-                _tailscale_http_on,
-                config=config,
-                port=port,
-            )
+            if config.provider == "tailscale":
+                await asyncio.to_thread(
+                    _tailscale_http_on,
+                    config=config,
+                    port=port,
+                )
+                url = _build_url(config=config, port=port)
+            else:
+                tunnel_process, url = await asyncio.to_thread(
+                    _cloudflared_start,
+                    config=config,
+                    port=port,
+                )
+                tunnel_pid = tunnel_process.pid
         except Exception:
             if dev_process is not None:
                 _stop_process(dev_process)
@@ -241,16 +287,17 @@ class PreviewManager:
             project=_context_project(context),
             branch=_context_branch(context),
             port=port,
-            url=_build_url(config=config, port=port),
+            url=url,
             provider=config.provider,
             created_at=time.time(),
             last_seen=time.time(),
             context_line=context_line,
             dev_pid=dev_process.pid if dev_process is not None else None,
-            tunnel_pid=None,
+            tunnel_pid=tunnel_pid,
             owns_dev_process=owns_dev_process,
             worktree_path=worktree_path,
             repo_root=repo_root,
+            tunnel_process=tunnel_process,
             dev_process=dev_process,
             log_path=log_path,
         )
@@ -274,16 +321,29 @@ class PreviewManager:
 
     async def stop_all(self, *, config: PreviewConfig) -> list[PreviewSession]:
         self._last_config = config
-        ports = await asyncio.to_thread(_tailscale_list_ports, config)
         now = time.time()
+        if config.provider == "tailscale":
+            ports = await asyncio.to_thread(_tailscale_list_ports, config)
+            async with self._lock:
+                sessions: list[PreviewSession] = []
+                for port in ports:
+                    session = self._sessions.pop(port, None)
+                    if session is None:
+                        session = _external_session(config=config, port=port, now=now)
+                    sessions.append(session)
+                sessions.extend(self._sessions.values())
+                self._sessions.clear()
+
+            for session in sessions:
+                await asyncio.to_thread(
+                    _stop_session,
+                    config=config,
+                    session=session,
+                )
+            return sessions
+
         async with self._lock:
-            sessions: list[PreviewSession] = []
-            for port in ports:
-                session = self._sessions.pop(port, None)
-                if session is None:
-                    session = _external_session(config=config, port=port, now=now)
-                sessions.append(session)
-            sessions.extend(self._sessions.values())
+            sessions = list(self._sessions.values())
             self._sessions.clear()
 
         for session in sessions:
@@ -296,16 +356,27 @@ class PreviewManager:
 
     async def list_sessions(self, *, config: PreviewConfig) -> list[PreviewSession]:
         self._last_config = config
-        ports = await asyncio.to_thread(_tailscale_list_ports, config)
         now = time.time()
+        if config.provider == "tailscale":
+            ports = await asyncio.to_thread(_tailscale_list_ports, config)
+            sessions: list[PreviewSession] = []
+            async with self._lock:
+                for port in ports:
+                    session = self._sessions.get(port)
+                    if session is None:
+                        session = _external_session(config=config, port=port, now=now)
+                    else:
+                        session.touch(now)
+                    sessions.append(session)
+            return sessions
+
         sessions: list[PreviewSession] = []
         async with self._lock:
-            for port in ports:
-                session = self._sessions.get(port)
-                if session is None:
-                    session = _external_session(config=config, port=port, now=now)
-                else:
-                    session.touch(now)
+            for port, session in list(self._sessions.items()):
+                if not _tunnel_is_alive(session):
+                    self._sessions.pop(port, None)
+                    continue
+                session.touch(now)
                 sessions.append(session)
         return sessions
 
@@ -385,7 +456,7 @@ MANAGER = PreviewManager()
 
 class PreviewCommand:
     id = "preview"
-    description = "Manage tailscale preview sessions"
+    description = "Manage preview sessions"
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         try:
@@ -576,6 +647,31 @@ def _optional_int_set(
                 f"Invalid `preview.{key}` in {config_path}; expected integers."
             )
         return set(items)  # type: ignore[return-value]
+    raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected a list.")
+
+
+def _optional_str_list(
+    config: dict[str, Any], key: str, *, config_path: Path
+) -> list[str] | None:
+    if key not in config:
+        return None
+    value = config.get(key)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ConfigError(
+                    f"Invalid `preview.{key}` in {config_path}; expected strings."
+                )
+            stripped = item.strip()
+            if not stripped:
+                raise ConfigError(
+                    f"Invalid `preview.{key}` in {config_path}; expected non-empty strings."
+                )
+            items.append(stripped)
+        return items
     raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected a list.")
 
 
@@ -797,6 +893,105 @@ async def _verify_dev_server(
     raise ConfigError(message)
 
 
+def _ensure_cloudflared(config: PreviewConfig) -> None:
+    bin_path = config.cloudflared_bin
+    if os.path.isabs(bin_path) or "/" in bin_path:
+        if Path(bin_path).exists():
+            return
+        raise ConfigError(
+            f"cloudflared not found at {bin_path!r}; install cloudflared first."
+        )
+    if shutil.which(bin_path):
+        return
+    raise ConfigError(
+        "cloudflared is not installed; install it and retry "
+        "(https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)."
+    )
+
+
+def _read_cloudflared_url(
+    process: subprocess.Popen[str], timeout_seconds: int
+) -> str | None:
+    streams = [process.stderr, process.stdout]
+    fd_map = {}
+    for stream in streams:
+        if stream is None:
+            continue
+        try:
+            fd_map[stream.fileno()] = stream
+        except OSError:
+            continue
+    if not fd_map:
+        return None
+
+    buffer = ""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        ready, _, _ = select.select(list(fd_map.keys()), [], [], remaining)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        for fd in ready:
+            stream = fd_map.get(fd)
+            if stream is None:
+                continue
+            chunk = stream.read(4096)
+            if not chunk:
+                continue
+            buffer += chunk
+            match = CLOUDFLARED_URL_RE.search(buffer)
+            if match:
+                return match.group(0)
+    return None
+
+
+def _stop_tunnel_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError, AttributeError):
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError, AttributeError):
+            process.kill()
+
+
+def _cloudflared_start(
+    *, config: PreviewConfig, port: int
+) -> tuple[subprocess.Popen[str], str]:
+    _ensure_cloudflared(config)
+    target = f"http://{config.local_host}:{port}"
+    cmd = [
+        config.cloudflared_bin,
+        "tunnel",
+        "--url",
+        target,
+        *config.cloudflared_args,
+    ]
+    logger.info("preview.cloudflared_on", cmd=" ".join(cmd))
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    url = _read_cloudflared_url(process, config.cloudflared_timeout_seconds)
+    if url is None:
+        _stop_tunnel_process(process)
+        raise ConfigError(
+            "cloudflared tunnel failed to start; no URL received (check port usage)."
+        )
+    return process, url
+
+
 def _tailscale_http_on(*, config: PreviewConfig, port: int) -> None:
     _ensure_tailscale(config)
     target = f"http://{config.local_host}:{port}"
@@ -985,19 +1180,41 @@ def _external_session(
         dev_pid=None,
         tunnel_pid=None,
         owns_dev_process=False,
+        tunnel_process=None,
     )
 
 
 def _stop_session(*, config: PreviewConfig, session: PreviewSession) -> None:
-    try:
-        _tailscale_http_off(config=config, port=session.port)
-    except ConfigError as exc:
-        logger.warning("preview.tailscale_off_failed", error=str(exc))
+    if session.provider == "tailscale":
+        try:
+            _tailscale_http_off(config=config, port=session.port)
+        except ConfigError as exc:
+            logger.warning("preview.tailscale_off_failed", error=str(exc))
+    elif session.provider == "cloudflare":
+        _stop_cloudflared(session)
     if session.owns_dev_process:
         if session.dev_process is not None:
             _stop_process(session.dev_process)
         elif session.dev_pid is not None:
             _stop_pid(session.dev_pid)
+
+
+def _stop_cloudflared(session: PreviewSession) -> None:
+    if session.tunnel_process is not None:
+        _stop_tunnel_process(session.tunnel_process)
+        return
+    if session.tunnel_pid is None:
+        return
+    try:
+        os.killpg(session.tunnel_pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError, AttributeError):
+        _stop_pid(session.tunnel_pid)
+        return
+    if _pid_is_alive(session.tunnel_pid):
+        try:
+            os.killpg(session.tunnel_pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError, AttributeError):
+            _stop_pid(session.tunnel_pid)
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:
@@ -1022,6 +1239,14 @@ def _stop_pid(pid: int) -> None:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             return
+
+
+def _tunnel_is_alive(session: PreviewSession) -> bool:
+    if session.tunnel_process is not None:
+        return session.tunnel_process.poll() is None
+    if session.tunnel_pid is not None:
+        return _pid_is_alive(session.tunnel_pid)
+    return True
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -1181,8 +1406,13 @@ def _format_started(
     if dev_status is None:
         dev_status = "started by preview" if session.owns_dev_process else "external"
     dev_line = f"Dev server: {dev_status}"
+    label = "Preview enabled"
+    if session.provider == "cloudflare":
+        label = "Cloudflare preview enabled"
+    elif session.provider == "tailscale":
+        label = "Tailscale preview enabled"
     return (
-        f"Tailscale preview enabled on port {session.port}.\n"
+        f"{label} on port {session.port}.\n"
         f"{dev_line}\n"
         f"Open: {url}{context}\n"
         f"ID: {session.session_id}"
