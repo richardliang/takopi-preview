@@ -219,6 +219,19 @@ class WorktreePolicyTests(unittest.TestCase):
         output = backend._format_killall([session])
         self.assertIn("https://example/preview/5175", output)
 
+    def test_extract_ports_from_text(self) -> None:
+        text = "active /preview/3000 and https://host/preview/5173/test"
+        ports = backend._extract_preview_ports_from_text(text)
+        self.assertEqual(ports, {3000, 5173})
+
+    def test_extract_ports_from_json(self) -> None:
+        payload = {
+            "Web": {"Handlers": {"/preview/4444": {"Proxy": "http://127.0.0.1:4444"}}},
+            "Extra": ["/preview/5555", {"path": "/preview/6666/"}],
+        }
+        ports = backend._extract_preview_ports(payload)
+        self.assertEqual(ports, {4444, 5555, 6666})
+
 
 if __name__ == "__main__":
     unittest.main()

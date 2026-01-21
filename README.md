@@ -12,7 +12,7 @@ published as the `takopi-preview` package. the command id is `preview`.
 - tailnet-only urls (no public ingress) with `tailscale serve`
 - per-project overrides for ports and dev commands
 - optional dev server auto-start with `{port}` substitution
-- session registry with ttl expiration and state recovery
+- session registry with ttl expiration
 - allowlist support for sensitive commands (like `killall`)
 
 ## requirements
@@ -108,18 +108,16 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 
 ## state and ttl
 
-sessions are stored in memory and persisted to:
-
-- `~/.takopi/state/preview.json`
+sessions are derived from `tailscale serve status`; no preview state file is written.
 
 dev server logs (when auto-started) are written to:
 
 - `~/.takopi/state/preview-logs/<session>.log`
 
-`ttl_minutes` controls automatic expiration; expired sessions are cleaned up
-on the next command invocation.
+`ttl_minutes` controls automatic expiration for previews started by this takopi
+process; expired sessions are cleaned up on the next command invocation.
 worktrees that are pruned or deleted are also cleaned up on the next command.
-takopi shutdown stops all previews and clears state, so sessions do not persist.
+takopi shutdown stops all previews.
 
 ## errors
 
@@ -137,7 +135,7 @@ this implementation follows the webapp preview workflow spec:
 - [x] config in `[plugins.preview]` with per-project overrides
 - [x] tailscale serve + dns from `tailscale status --json`
 - [x] tailnet-only https urls
-- [x] in-memory registry + state file under `~/.takopi/state/preview.json`
+- [x] tailscale-native serve registry (no state file)
 - [x] ttl-based expiration (`ttl_minutes`)
 - [x] allowlist enforcement via `allowed_user_ids`
 
