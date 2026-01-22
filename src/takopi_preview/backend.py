@@ -681,8 +681,6 @@ def _parse_local_target_port(
 def _tailscale_https_port(config: PreviewConfig, port: int) -> int:
     if config.tailscale_https_port is not None:
         return config.tailscale_https_port
-    if config.path_prefix in {"", "/"}:
-        return port
     return 443
 
 

@@ -154,10 +154,12 @@ to the tailnet IP by running Metro with `--host 0.0.0.0`.
   disable the existing serve entry before starting a new preview.
 - tailscale: set `path_prefix = "/"` to serve from the tailnet root. This
   avoids subpath issues with apps that assume `/`, but only one preview can be
-  served at a time unless you also set per-preview HTTPS ports.
-- tailscale: when `path_prefix = "/"`, the default HTTPS port is the preview
-  port (so `5173` maps to `https://host.ts.net:5173`). Set
-  `tailscale_https_port = 443` to force the default HTTPS port.
+  served at a time with the built-in config. Use `path_prefix = "/preview"` if
+  you need multiple concurrent previews.
+- tailscale: the default HTTPS port is `443`, so previews map to
+  `https://host.ts.net/preview/<port>` (or `https://host.ts.net/` when
+  `path_prefix = "/"`). Set `tailscale_https_port` to a specific port if you
+  need the URL to include `:<port>` on the tailnet.
 
 `ttl_minutes` controls automatic expiration for previews started by this takopi
 process; expired sessions are cleaned up on the next command invocation.

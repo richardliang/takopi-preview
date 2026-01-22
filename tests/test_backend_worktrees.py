@@ -291,12 +291,12 @@ class TailscaleSessionTests(unittest.TestCase):
         try:
             self.assertEqual(
                 backend._build_url(config=config, port=5173),
-                "https://host.ts.net:5173",
+                "https://host.ts.net",
             )
-            override = replace(config, tailscale_https_port=443)
+            override = replace(config, tailscale_https_port=5173)
             self.assertEqual(
                 backend._build_url(config=override, port=5173),
-                "https://host.ts.net",
+                "https://host.ts.net:5173",
             )
         finally:
             backend._get_dns_name = original
