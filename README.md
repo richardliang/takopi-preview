@@ -158,8 +158,10 @@ to the tailnet IP by running Metro with `--host 0.0.0.0`.
   you need multiple concurrent previews.
 - tailscale: the default HTTPS port is `443`, so previews map to
   `https://host.ts.net/preview/<port>` (or `https://host.ts.net/` when
-  `path_prefix = "/"`). Set `tailscale_https_port` to a specific port if you
-  need the URL to include `:<port>` on the tailnet.
+  `path_prefix = "/"`). Set `tailscale_https_port = 0` to use the preview
+  port (for `https://host.ts.net:3000/`). When using per-port HTTPS, start the
+  dev server on `127.0.0.1` (no `--host 0.0.0.0`) so tailscale can bind the
+  public port without conflicts.
 
 `ttl_minutes` controls automatic expiration for previews started by this takopi
 process; expired sessions are cleaned up on the next command invocation.

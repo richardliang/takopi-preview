@@ -225,10 +225,17 @@ class ConfigValidationTests(unittest.TestCase):
                 config_path=Path("takopi.toml"),
             )
 
+    def test_allows_preview_port_https(self) -> None:
+        config = backend.PreviewConfig.from_config(
+            {"tailscale_https_port": 0},
+            config_path=Path("takopi.toml"),
+        )
+        self.assertEqual(config.tailscale_https_port, 0)
+
     def test_rejects_invalid_https_port(self) -> None:
         with self.assertRaises(ConfigError):
             backend.PreviewConfig.from_config(
-                {"tailscale_https_port": 0},
+                {"tailscale_https_port": 70000},
                 config_path=Path("takopi.toml"),
             )
 
@@ -293,7 +300,7 @@ class TailscaleSessionTests(unittest.TestCase):
                 backend._build_url(config=config, port=5173),
                 "https://host.ts.net",
             )
-            override = replace(config, tailscale_https_port=5173)
+            override = replace(config, tailscale_https_port=0)
             self.assertEqual(
                 backend._build_url(config=override, port=5173),
                 "https://host.ts.net:5173",

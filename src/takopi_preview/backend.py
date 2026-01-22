@@ -104,12 +104,12 @@ class PreviewConfig:
         tailscale_https_port = _optional_int(
             config, "tailscale_https_port", config_path=config_path
         )
-        if tailscale_https_port is not None and not (
+        if tailscale_https_port is not None and tailscale_https_port != 0 and not (
             1 <= tailscale_https_port <= 65535
         ):
             raise ConfigError(
                 f"Invalid `preview.tailscale_https_port` in {config_path}; "
-                "expected a valid port."
+                "expected a valid port or 0 to use the preview port."
             )
         local_host = (
             _optional_str(config, "local_host", config_path=config_path) or "127.0.0.1"
@@ -680,6 +680,8 @@ def _parse_local_target_port(
 
 def _tailscale_https_port(config: PreviewConfig, port: int) -> int:
     if config.tailscale_https_port is not None:
+        if config.tailscale_https_port == 0:
+            return port
         return config.tailscale_https_port
     return 443
 
