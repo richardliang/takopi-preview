@@ -4,6 +4,7 @@ import atexit
 import asyncio
 import json
 import re
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -17,6 +18,8 @@ from takopi.api import (
     CommandResult,
     ConfigError,
     HOME_CONFIG_PATH,
+    RunContext,
+    RunRequest,
     get_logger,
 )
 from takopi.utils.git import git_stdout, resolve_main_worktree_root
@@ -27,9 +30,54 @@ SAFE_PORT_MIN = 1024
 SAFE_PORT_MAX = 65535
 DEFAULT_TTL_MINUTES = 120
 PATH_PREFIX = "/preview"
+DEV_SERVER_START_TIMEOUT_SECONDS = 90
+DEV_SERVER_POLL_INTERVAL_SECONDS = 1.0
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
 LOCAL_PROXY_PORT_RE = re.compile(
     r"http://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)"
+)
+
+DEV_SERVER_START_PROMPT = (
+    "You are operating within a Takopi worktree context.\n"
+    "\n"
+    "Goal: ensure the correct dev server is running for preview.\n"
+    "\n"
+    "Target:\n"
+    "- host: {host}\n"
+    "- port: {port}\n"
+    "\n"
+    "Rules:\n"
+    "- If something is already listening on the target port, confirm it is the "
+    "correct dev server and leave it running.\n"
+    "- If nothing is listening, find the right dev command from README, "
+    "AGENTS, or package scripts and start it.\n"
+    "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
+    "uv > poetry > pip for Python).\n"
+    "- Install dependencies only if required to start the dev server.\n"
+    "- Bind to the target host and port; avoid public binds unless required.\n"
+    "\n"
+    "Edge cases:\n"
+    "- Monorepo with multiple apps: pick the app for this context and say which.\n"
+    "- If the default port differs, override it to {port} or explain why you "
+    "cannot.\n"
+    "- If startup fails, report the error and the next step.\n"
+    "\n"
+    "Context: {context_line}\n"
+    "Worktree: {worktree}\n"
+)
+
+DEV_SERVER_STOP_PROMPT = (
+    "You are operating within a Takopi worktree context.\n"
+    "\n"
+    "Goal: stop the dev server if it is still listening on port {port}.\n"
+    "\n"
+    "Rules:\n"
+    "- If nothing is listening on the port, do nothing.\n"
+    "- Prefer a graceful stop (repo stop command or SIGTERM).\n"
+    "- Report what you stopped or why it could not be stopped.\n"
+    "\n"
+    "Context: {context_line}\n"
+    "Worktree: {worktree}\n"
 )
 
 
@@ -74,7 +122,8 @@ class PreviewConfig:
             raise ConfigError(
                 f"Invalid preview config in {config_path}; "
                 "dev server auto-start has been removed. "
-                "Start your server separately and use preview to serve ports."
+                "Use /preview start to ask Takopi to start your server, or start "
+                "it manually."
             )
 
         default_port = _optional_int(config, "port", config_path=config_path)
@@ -144,6 +193,13 @@ class PreviewSession:
 
     def touch(self, now: float | None = None) -> None:
         self.last_seen = now or time.time()
+
+
+@dataclass(frozen=True, slots=True)
+class PromptContext:
+    context_line: str | None
+    cwd: Path | None
+    worktree_path: Path | None
 
 
 class PreviewManager:
@@ -412,6 +468,15 @@ class PreviewCommand:
         if command in {"start", "on"}:
             port = _parse_start_args(ctx.args[1:], config)
             worktree_path, repo_root = _require_worktree(cwd)
+            await _ensure_dev_server_ready(
+                ctx=ctx,
+                config=config,
+                port=port,
+                context=context,
+                context_line=context_line,
+                cwd=cwd,
+                worktree_path=worktree_path,
+            )
             session = await MANAGER.start(
                 config=config,
                 port=port,
@@ -431,9 +496,29 @@ class PreviewCommand:
                 arg=_arg(ctx.args, 1),
                 context=context,
             )
+            await _maybe_stop_dev_server(
+                ctx=ctx,
+                config=config,
+                port=session.port,
+                context_line=session.context_line or context_line,
+                cwd=cwd,
+                worktree_path=session.worktree_path,
+                run_context=_session_context(session),
+            )
             session = await MANAGER.stop(config=config, session=session)
             return CommandResult(text=_format_stopped(session))
         if command in {"killall", "stopall"}:
+            sessions = await MANAGER.list_sessions(config=config)
+            for session in sessions:
+                await _maybe_stop_dev_server(
+                    ctx=ctx,
+                    config=config,
+                    port=session.port,
+                    context_line=session.context_line or context_line,
+                    cwd=cwd,
+                    worktree_path=session.worktree_path,
+                    run_context=_session_context(session),
+                )
             sessions = await MANAGER.stop_all(config=config)
             return CommandResult(text=_format_killall(sessions))
         if command in {"help", "--help", "-h"}:
@@ -657,6 +742,153 @@ def _normalize_path_prefix(prefix: str) -> str:
     if trimmed != "/" and trimmed.endswith("/"):
         trimmed = trimmed.rstrip("/")
     return trimmed
+
+
+def _probe_host(config: PreviewConfig) -> str:
+    host = config.local_host.strip()
+    if host in {"0.0.0.0", "localhost"}:
+        return "127.0.0.1"
+    return host or "127.0.0.1"
+
+
+def _format_prompt_context(prompt_context: PromptContext) -> str:
+    return prompt_context.context_line or "none"
+
+
+def _format_prompt_worktree(prompt_context: PromptContext) -> str:
+    if prompt_context.worktree_path is not None:
+        return str(prompt_context.worktree_path)
+    if prompt_context.cwd is not None:
+        return str(prompt_context.cwd)
+    return "unknown"
+
+
+def _build_dev_server_start_prompt(
+    *,
+    host: str,
+    port: int,
+    prompt_context: PromptContext,
+) -> str:
+    return DEV_SERVER_START_PROMPT.format(
+        host=host,
+        port=port,
+        context_line=_format_prompt_context(prompt_context),
+        worktree=_format_prompt_worktree(prompt_context),
+    )
+
+
+def _build_dev_server_stop_prompt(
+    *,
+    port: int,
+    prompt_context: PromptContext,
+) -> str:
+    return DEV_SERVER_STOP_PROMPT.format(
+        port=port,
+        context_line=_format_prompt_context(prompt_context),
+        worktree=_format_prompt_worktree(prompt_context),
+    )
+
+
+def _as_run_context(context: object | None) -> RunContext | None:
+    if isinstance(context, RunContext):
+        return context
+    project = _context_project(context)
+    branch = _context_branch(context)
+    if project is None and branch is None:
+        return None
+    return RunContext(project=project, branch=branch)
+
+
+def _session_context(session: PreviewSession) -> RunContext | None:
+    if session.project is None and session.branch is None:
+        return None
+    return RunContext(project=session.project, branch=session.branch)
+
+
+def _is_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+async def _wait_for_port_open(
+    host: str,
+    port: int,
+    *,
+    timeout_seconds: float,
+    interval_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if await asyncio.to_thread(_is_port_open, host, port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval_seconds)
+
+
+async def _ensure_dev_server_ready(
+    *,
+    ctx: CommandContext,
+    config: PreviewConfig,
+    port: int,
+    context: object | None,
+    context_line: str | None,
+    cwd: Path | None,
+    worktree_path: Path | None,
+) -> None:
+    host = _probe_host(config)
+    prompt_context = PromptContext(
+        context_line=context_line,
+        cwd=cwd,
+        worktree_path=worktree_path,
+    )
+    prompt = _build_dev_server_start_prompt(
+        host=host,
+        port=port,
+        prompt_context=prompt_context,
+    )
+    await ctx.executor.run_one(
+        RunRequest(prompt=prompt, context=_as_run_context(context))
+    )
+    ready = await _wait_for_port_open(
+        host,
+        port,
+        timeout_seconds=DEV_SERVER_START_TIMEOUT_SECONDS,
+        interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
+    )
+    if not ready:
+        raise ConfigError(
+            f"Dev server did not start on {host}:{port} within "
+            f"{DEV_SERVER_START_TIMEOUT_SECONDS:.0f}s."
+        )
+
+
+async def _maybe_stop_dev_server(
+    *,
+    ctx: CommandContext,
+    config: PreviewConfig,
+    port: int,
+    context_line: str | None,
+    cwd: Path | None,
+    worktree_path: Path | None,
+    run_context: RunContext | None,
+) -> None:
+    host = _probe_host(config)
+    if not await asyncio.to_thread(_is_port_open, host, port):
+        return
+    prompt_context = PromptContext(
+        context_line=context_line,
+        cwd=cwd,
+        worktree_path=worktree_path,
+    )
+    prompt = _build_dev_server_stop_prompt(
+        port=port,
+        prompt_context=prompt_context,
+    )
+    await ctx.executor.run_one(RunRequest(prompt=prompt, context=run_context))
 
 
 def _parse_local_target_port(

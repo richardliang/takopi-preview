@@ -38,6 +38,22 @@ def _ensure_takopi_stubs() -> None:
             self.notify = notify
             self.reply_to = reply_to
 
+    class RunContext:
+        def __init__(self, project: str | None = None, branch: str | None = None) -> None:
+            self.project = project
+            self.branch = branch
+
+    class RunRequest:
+        def __init__(
+            self,
+            prompt: str,
+            engine: str | None = None,
+            context: RunContext | None = None,
+        ) -> None:
+            self.prompt = prompt
+            self.engine = engine
+            self.context = context
+
     class _Logger:
         def info(self, *_args, **_kwargs) -> None:
             return None
@@ -85,6 +101,8 @@ def _ensure_takopi_stubs() -> None:
     api_mod.CommandResult = CommandResult
     api_mod.ConfigError = ConfigError
     api_mod.HOME_CONFIG_PATH = Path.home() / ".takopi" / "takopi.toml"
+    api_mod.RunContext = RunContext
+    api_mod.RunRequest = RunRequest
     api_mod.get_logger = get_logger
 
     git_mod.git_stdout = git_stdout
