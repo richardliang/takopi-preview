@@ -68,7 +68,8 @@ port = 5173
 notes:
 
 - `provider = "tailscale"` uses tailnet-only urls from `tailscale serve`.
-- preview only configures tailscale serve; start your dev server separately.
+- `/preview start` prompts Takopi to start the dev server if needed and waits
+  for the port to open; you can also start it manually.
 - takopi-preview is a command backend plugin that registers `/preview` and
   manages `tailscale serve` entries based on takopi context/worktrees.
 - `ttl_minutes = 0` disables expiration.
@@ -86,8 +87,9 @@ notes:
 
 1. choose a context: `/myapp @feat/login` or reply in an existing thread.
    previews only run in worktrees, so include a branch to create/use one.
-2. start your dev server in that worktree (ex: `pnpm dev -- --port 5173`).
-3. run `/preview start` (or `/preview start 5173`).
+2. start your dev server in that worktree (ex: `pnpm dev -- --port 5173`) or
+   let `/preview start` prompt Takopi to do it.
+3. run `/preview start` (or `/preview start 5173`) and wait for readiness.
 4. open the returned url, for example:
 
 ```
@@ -110,7 +112,7 @@ server: {
 },
 ```
 
-Start the dev server, then run `/preview start 5173`.
+Start the dev server (or rely on `/preview start`), then run `/preview start 5173`.
 
 ### react native (metro)
 
@@ -175,7 +177,7 @@ takopi shutdown stops all previews.
 - preview already active: if a port is already served, takopi will stop the
   existing serve entry before re-enabling it.
 - service not reachable: ensure your dev server is running and bound to
-  `local_host` (default `127.0.0.1`).
+  `local_host` (default `127.0.0.1`); rerun `/preview start` if needed.
 - not in a worktree: include a branch (ex: `/myapp @feat/foo`) to create/use a worktree.
 
 ## spec alignment
