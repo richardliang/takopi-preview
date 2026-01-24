@@ -87,8 +87,8 @@ notes:
 
 1. choose a context: `/myapp @feat/login` or reply in an existing thread.
    previews only run in worktrees, so include a branch to create/use one.
-2. start your dev server in that worktree (ex: `pnpm dev -- --port 5173`) or
-   let `/preview start` prompt Takopi to do it.
+2. start your dev server in that worktree (ex: `pnpm dev -- --host 127.0.0.1 --port 5173`)
+   or let `/preview start` prompt Takopi to do it.
 3. run `/preview start` (or `/preview start 5173`) and wait for readiness.
 4. open the returned url, for example:
 
@@ -97,6 +97,22 @@ https://DEVICE.TAILNET.ts.net/preview/5173
 ```
 
 5. stop when done: `/preview stop` or `/preview stop 5173`.
+
+## dev server prompting
+
+`/preview start` asks Takopi to ensure the dev server is running for the current
+worktree before enabling Tailscale Serve.
+
+- if the target port is already listening, Takopi confirms it is the right
+  server and leaves it running.
+- if the port is closed, Takopi finds the right dev command (README, AGENTS,
+  package scripts) and starts it, preferring pnpm > bun > npm > yarn or
+  uv > poetry > pip.
+- the server should bind to `local_host` (default `127.0.0.1`) and the requested
+  port; `/preview start` waits up to ~90s for the port to open.
+
+`/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
+still listening on the preview port.
 
 ## common setups
 
