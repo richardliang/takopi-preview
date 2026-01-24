@@ -508,7 +508,7 @@ class PreviewCommand:
             session = await MANAGER.stop(config=config, session=session)
             return CommandResult(text=_format_stopped(session))
         if command in {"killall", "stopall"}:
-            sessions = await MANAGER.list_sessions(config=config)
+            sessions = await MANAGER.stop_all(config=config)
             for session in sessions:
                 await _maybe_stop_dev_server(
                     ctx=ctx,
@@ -519,7 +519,6 @@ class PreviewCommand:
                     worktree_path=session.worktree_path,
                     run_context=_session_context(session),
                 )
-            sessions = await MANAGER.stop_all(config=config)
             return CommandResult(text=_format_killall(sessions))
         if command in {"help", "--help", "-h"}:
             return CommandResult(text=_help_text())
