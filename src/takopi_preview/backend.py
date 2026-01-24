@@ -743,11 +743,11 @@ def _normalize_path_prefix(prefix: str) -> str:
     return trimmed
 
 
-def _probe_host(config: PreviewConfig) -> str:
+def _probe_hosts(config: PreviewConfig) -> tuple[str, ...]:
     host = config.local_host.strip()
     if host in {"0.0.0.0", "localhost"}:
-        return "127.0.0.1"
-    return host or "127.0.0.1"
+        return ("127.0.0.1", "::1")
+    return (host or "127.0.0.1",)
 
 
 def _format_prompt_context(prompt_context: PromptContext) -> str:
@@ -813,7 +813,7 @@ def _is_port_open(host: str, port: int) -> bool:
 
 
 async def _wait_for_port_open(
-    host: str,
+    hosts: tuple[str, ...],
     port: int,
     *,
     timeout_seconds: float,
@@ -821,8 +821,9 @@ async def _wait_for_port_open(
 ) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if await asyncio.to_thread(_is_port_open, host, port):
-            return True
+        for host in hosts:
+            if await asyncio.to_thread(_is_port_open, host, port):
+                return True
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(interval_seconds)
@@ -838,14 +839,14 @@ async def _ensure_dev_server_ready(
     cwd: Path | None,
     worktree_path: Path | None,
 ) -> None:
-    host = _probe_host(config)
+    hosts = _probe_hosts(config)
     prompt_context = PromptContext(
         context_line=context_line,
         cwd=cwd,
         worktree_path=worktree_path,
     )
     prompt = _build_dev_server_start_prompt(
-        host=host,
+        host=hosts[0],
         port=port,
         prompt_context=prompt_context,
     )
@@ -853,14 +854,15 @@ async def _ensure_dev_server_ready(
         RunRequest(prompt=prompt, context=_as_run_context(context))
     )
     ready = await _wait_for_port_open(
-        host,
+        hosts,
         port,
         timeout_seconds=DEV_SERVER_START_TIMEOUT_SECONDS,
         interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
     )
     if not ready:
+        host_label = ", ".join(hosts)
         raise ConfigError(
-            f"Dev server did not start on {host}:{port} within "
+            f"Dev server did not start on {host_label}:{port} within "
             f"{DEV_SERVER_START_TIMEOUT_SECONDS:.0f}s."
         )
 
@@ -875,8 +877,13 @@ async def _maybe_stop_dev_server(
     worktree_path: Path | None,
     run_context: RunContext | None,
 ) -> None:
-    host = _probe_host(config)
-    if not await asyncio.to_thread(_is_port_open, host, port):
+    hosts = _probe_hosts(config)
+    open_found = False
+    for host in hosts:
+        if await asyncio.to_thread(_is_port_open, host, port):
+            open_found = True
+            break
+    if not open_found:
         return
     prompt_context = PromptContext(
         context_line=context_line,
