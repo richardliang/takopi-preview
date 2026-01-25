@@ -83,7 +83,6 @@ DEV_SERVER_STOP_PROMPT = (
 
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
-    default_port: int | None
     ttl_minutes: int
     allowed_user_ids: set[int] | None
     tailscale_bin: str
@@ -126,10 +125,6 @@ class PreviewConfig:
                 "it manually."
             )
 
-        default_port = _optional_int(config, "port", config_path=config_path)
-        if default_port is None:
-            default_port = _optional_int(config, "default_port", config_path=config_path)
-
         ttl_minutes = _optional_int(config, "ttl_minutes", config_path=config_path)
         if ttl_minutes is None:
             ttl_minutes = DEFAULT_TTL_MINUTES
@@ -166,7 +161,6 @@ class PreviewConfig:
         )
 
         return cls(
-            default_port=default_port,
             ttl_minutes=ttl_minutes,
             allowed_user_ids=allowed_user_ids,
             tailscale_bin=tailscale_bin,
@@ -692,13 +686,17 @@ def _parse_start_args(
     args: tuple[str, ...],
 ) -> tuple[int, str | None]:
     if not args:
-        raise ConfigError("preview start requires a port (ex: /preview start 5173).")
+        raise ConfigError(_usage_preview_start())
     port_token = args[0]
     parsed = _parse_port(port_token)
     if parsed is None:
         raise ConfigError(f"Invalid port {port_token!r}.")
     instruction = " ".join(args).strip()
     return parsed, instruction or None
+
+
+def _usage_preview_start() -> str:
+    return "usage: `/preview start <port> [instruction...]`"
 
 
 def _normalize_path_prefix(prefix: str) -> str:
