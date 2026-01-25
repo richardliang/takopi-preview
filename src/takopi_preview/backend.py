@@ -465,6 +465,7 @@ class PreviewCommand:
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
             port, instruction = _parse_start_args(ctx.args[1:])
+            _validate_port(port)
             worktree_path, repo_root = _require_worktree(cwd)
             await _ensure_dev_server_ready(
                 ctx=ctx,

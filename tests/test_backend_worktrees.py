@@ -304,6 +304,11 @@ def test_parse_start_args_rejects_invalid_port() -> None:
         backend._parse_start_args(("dev", "server", "8081"))
 
 
+def test_start_requires_valid_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._validate_port(0)
+
+
 
 
 def test_extract_ports_from_text() -> None:
