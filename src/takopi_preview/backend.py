@@ -466,12 +466,13 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port = _parse_start_args(ctx.args[1:], config)
+            port, instruction = _parse_start_args(ctx.args[1:], config)
             worktree_path, repo_root = _require_worktree(cwd)
             await _ensure_dev_server_ready(
                 ctx=ctx,
                 config=config,
                 port=port,
+                instruction=instruction,
                 context=context,
                 context_line=context_line,
                 cwd=cwd,
@@ -691,38 +692,53 @@ def _parse_port(arg: str | None) -> int | None:
 def _parse_start_args(
     args: tuple[str, ...],
     config: PreviewConfig,
-) -> int:
+) -> tuple[int, str | None]:
     port: int | None = None
+    prompt_tokens: list[str] = []
     idx = 0
+    parse_flags = True
 
     while idx < len(args):
         token = args[idx]
-        key, value = _split_flag(token)
-        if key == "--port":
-            if value is None:
-                idx += 1
-                if idx >= len(args):
-                    raise ConfigError("preview start requires a value after --port")
-                value = args[idx]
-            parsed = _parse_port(value)
-            if parsed is None:
-                raise ConfigError(f"Invalid port {value!r}.")
-            port = parsed
+        if parse_flags and token == "--":
+            parse_flags = False
             idx += 1
             continue
-        if key.startswith("--"):
-            raise ConfigError(f"Unknown flag {key!r}.")
+        if parse_flags:
+            key, value = _split_flag(token)
+            if key == "--port":
+                if value is None:
+                    idx += 1
+                    if idx >= len(args):
+                        raise ConfigError("preview start requires a value after --port")
+                    value = args[idx]
+                parsed = _parse_port(value)
+                if parsed is None:
+                    raise ConfigError(f"Invalid port {value!r}.")
+                port = parsed
+                idx += 1
+                continue
+            if key.startswith("--"):
+                raise ConfigError(f"Unknown flag {key!r}.")
+        prompt_tokens.append(token)
         if port is None:
             parsed = _parse_port(token)
             if parsed is not None:
                 port = parsed
-                idx += 1
-                continue
-        raise ConfigError(f"Unexpected argument {token!r}.")
+        idx += 1
 
     if port is None:
         port = config.default_port
-    return port
+    return port, _prompt_instruction(prompt_tokens, port)
+
+
+def _prompt_instruction(tokens: list[str], port: int) -> str | None:
+    if not tokens:
+        return None
+    if len(tokens) == 1 and _parse_port(tokens[0]) == port:
+        return None
+    text = " ".join(tokens).strip()
+    return text or None
 
 
 def _split_flag(token: str) -> tuple[str, str | None]:
@@ -767,13 +783,17 @@ def _build_dev_server_start_prompt(
     host: str,
     port: int,
     prompt_context: PromptContext,
+    instruction: str | None,
 ) -> str:
-    return DEV_SERVER_START_PROMPT.format(
+    prompt = DEV_SERVER_START_PROMPT.format(
         host=host,
         port=port,
         context_line=_format_prompt_context(prompt_context),
         worktree=_format_prompt_worktree(prompt_context),
     )
+    if instruction:
+        prompt = f"{prompt}\nUser instruction: {instruction}\n"
+    return prompt
 
 
 def _build_dev_server_stop_prompt(
@@ -834,6 +854,7 @@ async def _ensure_dev_server_ready(
     ctx: CommandContext,
     config: PreviewConfig,
     port: int,
+    instruction: str | None,
     context: object | None,
     context_line: str | None,
     cwd: Path | None,
@@ -849,6 +870,7 @@ async def _ensure_dev_server_ready(
         host=hosts[0],
         port=port,
         prompt_context=prompt_context,
+        instruction=instruction,
     )
     await ctx.executor.run_one(
         RunRequest(prompt=prompt, context=_as_run_context(context))
@@ -1338,7 +1360,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start [port]\n"
+        "/preview start [port] [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"

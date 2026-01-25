@@ -272,6 +272,52 @@ def test_rejects_removed_dev_server_settings(payload: dict) -> None:
         )
 
 
+def test_parse_start_args_defaults_port() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    port, instruction = backend._parse_start_args((), config)
+    assert port == 3000
+    assert instruction is None
+
+
+def test_parse_start_args_port_only() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    port, instruction = backend._parse_start_args(("5173",), config)
+    assert port == 5173
+    assert instruction is None
+
+
+def test_parse_start_args_includes_instruction() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    port, instruction = backend._parse_start_args(
+        ("dev", "server", "for", "expo", "at", "8081"),
+        config,
+    )
+    assert port == 8081
+    assert instruction == "dev server for expo at 8081"
+
+
+def test_parse_start_args_allows_double_dash() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    port, instruction = backend._parse_start_args(
+        ("--port", "5173", "--", "use", "pnpm", "dev", "--", "--host", "127.0.0.1"),
+        config,
+    )
+    assert port == 5173
+    assert instruction == "use pnpm dev -- --host 127.0.0.1"
+
+
 def test_extract_ports_from_text() -> None:
     text = "active /preview/3000 and https://host/preview/5173/test"
     ports = backend._extract_preview_ports_from_text(text)

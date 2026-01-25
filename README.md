@@ -77,7 +77,7 @@ notes:
 
 ## commands
 
-- `/preview start [port]`: start a preview for the current context
+- `/preview start [port] [instruction...]`: start a preview for the current context
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
@@ -110,6 +110,18 @@ worktree before enabling Tailscale Serve.
   uv > poetry > pip.
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
   port; `/preview start` waits up to ~90s for the port to open.
+
+You can append an instruction to steer which server should run:
+
+```
+/preview start dev server for expo at 8081
+```
+
+If your instruction includes flags or `--`, separate it with `--`:
+
+```
+/preview start 5173 -- use pnpm dev -- --host 127.0.0.1 --port 5173
+```
 
 `/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
 still listening on the preview port.
