@@ -117,6 +117,9 @@ You can append an instruction to steer which server should run:
 /preview start dev server for expo at 8081
 ```
 
+All text after `/preview start` is forwarded to Takopi; the preview port is
+inferred from the instruction (or defaults to `default_port`).
+
 You can include flags directly in the instruction:
 
 ```

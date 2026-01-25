@@ -693,53 +693,42 @@ def _parse_start_args(
     args: tuple[str, ...],
     config: PreviewConfig,
 ) -> tuple[int, str | None]:
-    port: int | None = None
-    prompt_tokens: list[str] = []
-    idx = 0
-    seen_instruction = False
-
-    while idx < len(args):
-        token = args[idx]
-        key, value = _split_flag(token)
-        if not seen_instruction and key == "--port":
-            if value is None:
-                idx += 1
-                if idx >= len(args):
-                    raise ConfigError("preview start requires a value after --port")
-                value = args[idx]
-            parsed = _parse_port(value)
-            if parsed is None:
-                raise ConfigError(f"Invalid port {value!r}.")
-            port = parsed
-            idx += 1
-            continue
-        prompt_tokens.append(token)
-        if port is None:
-            parsed = _parse_port(token)
-            if parsed is not None:
-                port = parsed
-        seen_instruction = True
-        idx += 1
-
+    prompt_tokens = list(args)
+    port = _infer_port_from_tokens(prompt_tokens)
     if port is None:
         port = config.default_port
-    return port, _prompt_instruction(prompt_tokens, port)
+    return port, _prompt_instruction(prompt_tokens)
 
 
-def _prompt_instruction(tokens: list[str], port: int) -> str | None:
+def _infer_port_from_tokens(tokens: list[str]) -> int | None:
+    hinted: list[int] = []
+    candidates: list[int] = []
+    for idx, raw in enumerate(tokens):
+        token = raw.strip(".,;:)]}")
+        parsed = _parse_port(token)
+        if parsed is None:
+            continue
+        if not (SAFE_PORT_MIN <= parsed <= SAFE_PORT_MAX):
+            continue
+        candidates.append(parsed)
+        if idx > 0:
+            prev = tokens[idx - 1].lower().strip(".,;:)]}=")
+            if prev in {"port", "at"}:
+                hinted.append(parsed)
+    if hinted:
+        return hinted[-1]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        return candidates[-1]
+    return None
+
+
+def _prompt_instruction(tokens: list[str]) -> str | None:
     if not tokens:
-        return None
-    if len(tokens) == 1 and _parse_port(tokens[0]) == port:
         return None
     text = " ".join(tokens).strip()
     return text or None
-
-
-def _split_flag(token: str) -> tuple[str, str | None]:
-    if "=" in token:
-        key, value = token.split("=", 1)
-        return key, value
-    return token, None
 
 
 def _normalize_path_prefix(prefix: str) -> str:
