@@ -83,7 +83,6 @@ DEV_SERVER_STOP_PROMPT = (
 
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
-    default_port: int
     ttl_minutes: int
     allowed_user_ids: set[int] | None
     tailscale_bin: str
@@ -126,12 +125,6 @@ class PreviewConfig:
                 "it manually."
             )
 
-        default_port = _optional_int(config, "port", config_path=config_path)
-        if default_port is None:
-            default_port = _optional_int(config, "default_port", config_path=config_path)
-        if default_port is None:
-            default_port = 3000
-
         ttl_minutes = _optional_int(config, "ttl_minutes", config_path=config_path)
         if ttl_minutes is None:
             ttl_minutes = DEFAULT_TTL_MINUTES
@@ -168,7 +161,6 @@ class PreviewConfig:
         )
 
         return cls(
-            default_port=default_port,
             ttl_minutes=ttl_minutes,
             allowed_user_ids=allowed_user_ids,
             tailscale_bin=tailscale_bin,
@@ -466,12 +458,14 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port = _parse_start_args(ctx.args[1:], config)
+            port, instruction = _parse_start_args(ctx.args[1:])
+            _validate_port(port)
             worktree_path, repo_root = _require_worktree(cwd)
             await _ensure_dev_server_ready(
                 ctx=ctx,
                 config=config,
                 port=port,
+                instruction=instruction,
                 context=context,
                 context_line=context_line,
                 cwd=cwd,
@@ -690,46 +684,19 @@ def _parse_port(arg: str | None) -> int | None:
 
 def _parse_start_args(
     args: tuple[str, ...],
-    config: PreviewConfig,
-) -> int:
-    port: int | None = None
-    idx = 0
-
-    while idx < len(args):
-        token = args[idx]
-        key, value = _split_flag(token)
-        if key == "--port":
-            if value is None:
-                idx += 1
-                if idx >= len(args):
-                    raise ConfigError("preview start requires a value after --port")
-                value = args[idx]
-            parsed = _parse_port(value)
-            if parsed is None:
-                raise ConfigError(f"Invalid port {value!r}.")
-            port = parsed
-            idx += 1
-            continue
-        if key.startswith("--"):
-            raise ConfigError(f"Unknown flag {key!r}.")
-        if port is None:
-            parsed = _parse_port(token)
-            if parsed is not None:
-                port = parsed
-                idx += 1
-                continue
-        raise ConfigError(f"Unexpected argument {token!r}.")
-
-    if port is None:
-        port = config.default_port
-    return port
+) -> tuple[int, str | None]:
+    if not args:
+        raise ConfigError(_usage_preview_start())
+    port_token = args[0]
+    parsed = _parse_port(port_token)
+    if parsed is None:
+        raise ConfigError(f"Invalid port {port_token!r}.")
+    instruction = " ".join(args).strip()
+    return parsed, instruction or None
 
 
-def _split_flag(token: str) -> tuple[str, str | None]:
-    if "=" in token:
-        key, value = token.split("=", 1)
-        return key, value
-    return token, None
+def _usage_preview_start() -> str:
+    return "usage: `/preview start <port> [instruction...]`"
 
 
 def _normalize_path_prefix(prefix: str) -> str:
@@ -767,13 +734,17 @@ def _build_dev_server_start_prompt(
     host: str,
     port: int,
     prompt_context: PromptContext,
+    instruction: str | None,
 ) -> str:
-    return DEV_SERVER_START_PROMPT.format(
+    prompt = DEV_SERVER_START_PROMPT.format(
         host=host,
         port=port,
         context_line=_format_prompt_context(prompt_context),
         worktree=_format_prompt_worktree(prompt_context),
     )
+    if instruction:
+        prompt = f"{prompt}\nUser instruction: {instruction}\n"
+    return prompt
 
 
 def _build_dev_server_stop_prompt(
@@ -834,6 +805,7 @@ async def _ensure_dev_server_ready(
     ctx: CommandContext,
     config: PreviewConfig,
     port: int,
+    instruction: str | None,
     context: object | None,
     context_line: str | None,
     cwd: Path | None,
@@ -849,6 +821,7 @@ async def _ensure_dev_server_ready(
         host=hosts[0],
         port=port,
         prompt_context=prompt_context,
+        instruction=instruction,
     )
     await ctx.executor.run_one(
         RunRequest(prompt=prompt, context=_as_run_context(context))
@@ -1338,7 +1311,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start [port]\n"
+        "/preview start <port> [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"

@@ -1,50 +1,17 @@
 # takopi-preview
 
-preview command plugin for takopi. exposes existing local ports via
-`tailscale serve`, and tracks preview sessions by project/worktree context.
+Expose local dev servers over Tailscale Serve with `/preview` commands.
 
-published as the `takopi-preview` package. the command id is `preview`.
+## quickstart
 
-## features
-
-- `/preview` commands to start, list, stop, and clean up previews
-- per-project overrides for ports
-- session registry with ttl expiration
-- allowlist support for sensitive commands (like `killall`)
-
-## requirements
-
-- python 3.14+
-- takopi >= 0.20
-- provider tooling:
-  - tailscale installed and authenticated on the host (`tailscale up`)
-- the service you want to share binds to 127.0.0.1 (tunnels proxy locally)
-- security groups should not expose the local service port publicly
-
-## install
-
-install into the same environment as takopi.
+1. install takopi + this plugin (same environment as your transport).
 
 ```sh
-uv tool install -U takopi
 uv tool install -U takopi --with takopi-transport-slack --with takopi-preview
 ```
 
-or, with a virtualenv:
-
-```sh
-pip install takopi-transport-slack takopi-preview
-```
-
-## setup
-
-1. install tailscale and authenticate (`tailscale up`).
-2. enable magicdns so `DEVICE.TAILNET.ts.net` resolves. (https://tailscale.com)
-3. run takopi with your transport (slack or telegram) as usual.
-
-## configuration
-
-add to `~/.takopi/takopi.toml`:
+2. make sure tailscale is up and magicdns is enabled (`tailscale up`).
+3. add minimal config to `~/.takopi/takopi.toml`:
 
 ```toml
 [plugins]
@@ -52,51 +19,49 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 
 [plugins.preview]
 provider = "tailscale"
-default_port = 3000
-ttl_minutes = 120
-path_prefix = "/preview"
-tailscale_https_port = 443
-allowed_user_ids = [123456789]
-local_host = "127.0.0.1"
-tailscale_bin = "tailscale"
-
-# per-project overrides (Takopi project tables are strict, so use plugins.preview.projects)
-[plugins.preview.projects.myapp]
-port = 5173
 ```
 
-notes:
+4. in chat, pick a worktree context and start a preview:
 
-- `provider = "tailscale"` uses tailnet-only urls from `tailscale serve`.
-- `/preview start` prompts Takopi to start the dev server if needed and waits
-  for the port to open; you can also start it manually.
-- takopi-preview is a command backend plugin that registers `/preview` and
-  manages `tailscale serve` entries based on takopi context/worktrees.
-- `ttl_minutes = 0` disables expiration.
-- empty `allowed_user_ids` means no allowlist enforcement.
+```
+/myapp @feat/login
+/preview start 5173 use pnpm dev -- --host 127.0.0.1 --port 5173
+```
+
+Open the returned URL, then stop when done:
+
+```
+/preview stop 5173
+```
 
 ## commands
 
-- `/preview start [port]`: start a preview for the current context
+- `/preview start <port> [instruction...]`: start a preview for the current context
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
 - `/preview help`: usage help
 
-## workflow
+## optional config
 
-1. choose a context: `/myapp @feat/login` or reply in an existing thread.
-   previews only run in worktrees, so include a branch to create/use one.
-2. start your dev server in that worktree (ex: `pnpm dev -- --host 127.0.0.1 --port 5173`)
-   or let `/preview start` prompt Takopi to do it.
-3. run `/preview start` (or `/preview start 5173`) and wait for readiness.
-4. open the returned url, for example:
+```toml
+[plugins.preview]
+path_prefix = "/preview"
+ttl_minutes = 120
+tailscale_https_port = 443
+allowed_user_ids = [123456789]
+local_host = "127.0.0.1"
+tailscale_bin = "tailscale"
 
+[plugins.preview.projects.myapp]
+path_prefix = "/preview"
 ```
-https://DEVICE.TAILNET.ts.net/preview/5173
-```
 
-5. stop when done: `/preview stop` or `/preview stop 5173`.
+Notes:
+
+- `provider = "tailscale"` uses tailnet-only URLs from `tailscale serve`.
+- `ttl_minutes = 0` disables expiration.
+- empty `allowed_user_ids` means no allowlist enforcement.
 
 ## dev server prompting
 
@@ -110,6 +75,15 @@ worktree before enabling Tailscale Serve.
   uv > poetry > pip.
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
   port; `/preview start` waits up to ~90s for the port to open.
+
+All text after `/preview start` is forwarded to Takopi. The preview port must be
+the first argument.
+
+You can include flags directly in the instruction:
+
+```
+/preview start 5173 use pnpm dev --host 127.0.0.1 --port 5173
+```
 
 `/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
 still listening on the preview port.

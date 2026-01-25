@@ -272,6 +272,45 @@ def test_rejects_removed_dev_server_settings(payload: dict) -> None:
         )
 
 
+def test_parse_start_args_requires_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._parse_start_args(())
+
+
+def test_parse_start_args_port_only() -> None:
+    port, instruction = backend._parse_start_args(("5173",))
+    assert port == 5173
+    assert instruction == "5173"
+
+
+def test_parse_start_args_includes_instruction() -> None:
+    port, instruction = backend._parse_start_args(
+        ("8081", "dev", "server", "for", "expo"),
+    )
+    assert port == 8081
+    assert instruction == "8081 dev server for expo"
+
+
+def test_parse_start_args_allows_flag_like_instruction() -> None:
+    port, instruction = backend._parse_start_args(
+        ("5173", "use", "pnpm", "dev", "--host", "127.0.0.1", "--no-open"),
+    )
+    assert port == 5173
+    assert instruction == "5173 use pnpm dev --host 127.0.0.1 --no-open"
+
+
+def test_parse_start_args_rejects_invalid_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._parse_start_args(("dev", "server", "8081"))
+
+
+def test_start_requires_valid_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._validate_port(0)
+
+
+
+
 def test_extract_ports_from_text() -> None:
     text = "active /preview/3000 and https://host/preview/5173/test"
     ports = backend._extract_preview_ports_from_text(text)
