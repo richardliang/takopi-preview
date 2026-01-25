@@ -83,7 +83,7 @@ DEV_SERVER_STOP_PROMPT = (
 
 @dataclass(frozen=True, slots=True)
 class PreviewConfig:
-    default_port: int
+    default_port: int | None
     ttl_minutes: int
     allowed_user_ids: set[int] | None
     tailscale_bin: str
@@ -129,8 +129,6 @@ class PreviewConfig:
         default_port = _optional_int(config, "port", config_path=config_path)
         if default_port is None:
             default_port = _optional_int(config, "default_port", config_path=config_path)
-        if default_port is None:
-            default_port = 3000
 
         ttl_minutes = _optional_int(config, "ttl_minutes", config_path=config_path)
         if ttl_minutes is None:
@@ -466,7 +464,7 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port, instruction = _parse_start_args(ctx.args[1:], config)
+            port, instruction = _parse_start_args(ctx.args[1:])
             worktree_path, repo_root = _require_worktree(cwd)
             await _ensure_dev_server_ready(
                 ctx=ctx,
@@ -691,44 +689,15 @@ def _parse_port(arg: str | None) -> int | None:
 
 def _parse_start_args(
     args: tuple[str, ...],
-    config: PreviewConfig,
 ) -> tuple[int, str | None]:
-    prompt_tokens = list(args)
-    port = _infer_port_from_tokens(prompt_tokens)
-    if port is None:
-        port = config.default_port
-    return port, _prompt_instruction(prompt_tokens)
-
-
-def _infer_port_from_tokens(tokens: list[str]) -> int | None:
-    hinted: list[int] = []
-    candidates: list[int] = []
-    for idx, raw in enumerate(tokens):
-        token = raw.strip(".,;:)]}")
-        parsed = _parse_port(token)
-        if parsed is None:
-            continue
-        if not (SAFE_PORT_MIN <= parsed <= SAFE_PORT_MAX):
-            continue
-        candidates.append(parsed)
-        if idx > 0:
-            prev = tokens[idx - 1].lower().strip(".,;:)]}=")
-            if prev in {"port", "at"}:
-                hinted.append(parsed)
-    if hinted:
-        return hinted[-1]
-    if len(candidates) == 1:
-        return candidates[0]
-    if candidates:
-        return candidates[-1]
-    return None
-
-
-def _prompt_instruction(tokens: list[str]) -> str | None:
-    if not tokens:
-        return None
-    text = " ".join(tokens).strip()
-    return text or None
+    if not args:
+        raise ConfigError("preview start requires a port (ex: /preview start 5173).")
+    port_token = args[0]
+    parsed = _parse_port(port_token)
+    if parsed is None:
+        raise ConfigError(f"Invalid port {port_token!r}.")
+    instruction = " ".join(args).strip()
+    return parsed, instruction or None
 
 
 def _normalize_path_prefix(prefix: str) -> str:
@@ -1343,7 +1312,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start [port] [instruction...]\n"
+        "/preview start <port> [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"

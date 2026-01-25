@@ -272,76 +272,38 @@ def test_rejects_removed_dev_server_settings(payload: dict) -> None:
         )
 
 
-def test_parse_start_args_defaults_port() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
-    port, instruction = backend._parse_start_args((), config)
-    assert port == 3000
-    assert instruction is None
+def test_parse_start_args_requires_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._parse_start_args(())
 
 
 def test_parse_start_args_port_only() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
-    port, instruction = backend._parse_start_args(("5173",), config)
+    port, instruction = backend._parse_start_args(("5173",))
     assert port == 5173
     assert instruction == "5173"
 
 
 def test_parse_start_args_includes_instruction() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
     port, instruction = backend._parse_start_args(
-        ("dev", "server", "for", "expo", "at", "8081"),
-        config,
+        ("8081", "dev", "server", "for", "expo"),
     )
     assert port == 8081
-    assert instruction == "dev server for expo at 8081"
+    assert instruction == "8081 dev server for expo"
 
 
 def test_parse_start_args_allows_flag_like_instruction() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
     port, instruction = backend._parse_start_args(
-        ("use", "pnpm", "dev", "--host", "127.0.0.1", "--no-open"),
-        config,
-    )
-    assert port == 3000
-    assert instruction == "use pnpm dev --host 127.0.0.1 --no-open"
-
-
-def test_parse_start_args_treats_port_flag_as_text() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
-    port, instruction = backend._parse_start_args(
-        ("--port", "8081", "dev", "server", "for", "expo"),
-        config,
-    )
-    assert port == 8081
-    assert instruction == "--port 8081 dev server for expo"
-
-
-def test_parse_start_args_prefers_port_hint() -> None:
-    config = backend.PreviewConfig.from_config(
-        {},
-        config_path=Path("takopi.toml"),
-    )
-    port, instruction = backend._parse_start_args(
-        ("sdk", "1234", "port", "5173"),
-        config,
+        ("5173", "use", "pnpm", "dev", "--host", "127.0.0.1", "--no-open"),
     )
     assert port == 5173
-    assert instruction == "sdk 1234 port 5173"
+    assert instruction == "5173 use pnpm dev --host 127.0.0.1 --no-open"
+
+
+def test_parse_start_args_rejects_invalid_port() -> None:
+    with pytest.raises(ConfigError):
+        backend._parse_start_args(("dev", "server", "8081"))
+
+
 
 
 def test_extract_ports_from_text() -> None:

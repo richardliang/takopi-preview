@@ -52,7 +52,6 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 
 [plugins.preview]
 provider = "tailscale"
-default_port = 3000
 ttl_minutes = 120
 path_prefix = "/preview"
 tailscale_https_port = 443
@@ -62,7 +61,7 @@ tailscale_bin = "tailscale"
 
 # per-project overrides (Takopi project tables are strict, so use plugins.preview.projects)
 [plugins.preview.projects.myapp]
-port = 5173
+path_prefix = "/preview"
 ```
 
 notes:
@@ -77,7 +76,7 @@ notes:
 
 ## commands
 
-- `/preview start [port] [instruction...]`: start a preview for the current context
+- `/preview start <port> [instruction...]`: start a preview for the current context
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
@@ -89,7 +88,7 @@ notes:
    previews only run in worktrees, so include a branch to create/use one.
 2. start your dev server in that worktree (ex: `pnpm dev -- --host 127.0.0.1 --port 5173`)
    or let `/preview start` prompt Takopi to do it.
-3. run `/preview start` (or `/preview start 5173`) and wait for readiness.
+3. run `/preview start 5173` and wait for readiness.
 4. open the returned url, for example:
 
 ```
@@ -114,11 +113,11 @@ worktree before enabling Tailscale Serve.
 You can append an instruction to steer which server should run:
 
 ```
-/preview start dev server for expo at 8081
+/preview start 8081 dev server for expo
 ```
 
-All text after `/preview start` is forwarded to Takopi; the preview port is
-inferred from the instruction (or defaults to `default_port`).
+All text after `/preview start` is forwarded to Takopi. The preview port must be
+the first argument.
 
 You can include flags directly in the instruction:
 
