@@ -696,35 +696,29 @@ def _parse_start_args(
     port: int | None = None
     prompt_tokens: list[str] = []
     idx = 0
-    parse_flags = True
+    seen_instruction = False
 
     while idx < len(args):
         token = args[idx]
-        if parse_flags and token == "--":
-            parse_flags = False
+        key, value = _split_flag(token)
+        if not seen_instruction and key == "--port":
+            if value is None:
+                idx += 1
+                if idx >= len(args):
+                    raise ConfigError("preview start requires a value after --port")
+                value = args[idx]
+            parsed = _parse_port(value)
+            if parsed is None:
+                raise ConfigError(f"Invalid port {value!r}.")
+            port = parsed
             idx += 1
             continue
-        if parse_flags:
-            key, value = _split_flag(token)
-            if key == "--port":
-                if value is None:
-                    idx += 1
-                    if idx >= len(args):
-                        raise ConfigError("preview start requires a value after --port")
-                    value = args[idx]
-                parsed = _parse_port(value)
-                if parsed is None:
-                    raise ConfigError(f"Invalid port {value!r}.")
-                port = parsed
-                idx += 1
-                continue
-            if key.startswith("--"):
-                raise ConfigError(f"Unknown flag {key!r}.")
         prompt_tokens.append(token)
         if port is None:
             parsed = _parse_port(token)
             if parsed is not None:
                 port = parsed
+        seen_instruction = True
         idx += 1
 
     if port is None:

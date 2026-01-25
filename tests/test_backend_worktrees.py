@@ -305,17 +305,30 @@ def test_parse_start_args_includes_instruction() -> None:
     assert instruction == "dev server for expo at 8081"
 
 
-def test_parse_start_args_allows_double_dash() -> None:
+def test_parse_start_args_allows_flag_like_instruction() -> None:
     config = backend.PreviewConfig.from_config(
         {},
         config_path=Path("takopi.toml"),
     )
     port, instruction = backend._parse_start_args(
-        ("--port", "5173", "--", "use", "pnpm", "dev", "--", "--host", "127.0.0.1"),
+        ("use", "pnpm", "dev", "--host", "127.0.0.1", "--no-open"),
         config,
     )
-    assert port == 5173
-    assert instruction == "use pnpm dev -- --host 127.0.0.1"
+    assert port == 3000
+    assert instruction == "use pnpm dev --host 127.0.0.1 --no-open"
+
+
+def test_parse_start_args_port_flag_prefix_only() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    port, instruction = backend._parse_start_args(
+        ("--port", "8081", "dev", "server", "for", "expo"),
+        config,
+    )
+    assert port == 8081
+    assert instruction == "dev server for expo"
 
 
 def test_extract_ports_from_text() -> None:

@@ -117,10 +117,10 @@ You can append an instruction to steer which server should run:
 /preview start dev server for expo at 8081
 ```
 
-If your instruction includes flags or `--`, separate it with `--`:
+You can include flags directly in the instruction:
 
 ```
-/preview start 5173 -- use pnpm dev -- --host 127.0.0.1 --port 5173
+/preview start 5173 use pnpm dev --host 127.0.0.1 --port 5173
 ```
 
 `/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
