@@ -66,24 +66,6 @@ DEV_SERVER_START_PROMPT = (
     "Worktree: {worktree}\n"
 )
 
-DEV_SERVER_START_PROMPT_WITH_INSTRUCTION = (
-    "You are operating within a Takopi worktree context.\n"
-    "\n"
-    "Goal: ensure the correct dev server is running for preview.\n"
-    "\n"
-    "Target:\n"
-    "- host: {host}\n"
-    "- port: {port}\n"
-    "\n"
-    "Instruction:\n"
-    "{instruction}\n"
-    "\n"
-    "If the instruction fails, report the error and the next step.\n"
-    "\n"
-    "Context: {context_line}\n"
-    "Worktree: {worktree}\n"
-)
-
 DEV_SERVER_STOP_PROMPT = (
     "You are operating within a Takopi worktree context.\n"
     "\n"
@@ -807,18 +789,15 @@ def _build_dev_server_start_prompt(
     prompt_context: PromptContext,
     instruction: str | None,
 ) -> str:
-    template = (
-        DEV_SERVER_START_PROMPT_WITH_INSTRUCTION
-        if instruction
-        else DEV_SERVER_START_PROMPT
-    )
-    return template.format(
+    prompt = DEV_SERVER_START_PROMPT.format(
         host=host,
         port=port,
         context_line=_format_prompt_context(prompt_context),
         worktree=_format_prompt_worktree(prompt_context),
-        instruction=instruction or "",
     )
+    if instruction:
+        prompt = f"{prompt}\nUser instruction: {instruction}\n"
+    return prompt
 
 
 def _build_dev_server_stop_prompt(
