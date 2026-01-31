@@ -256,6 +256,14 @@ def test_rejects_invalid_https_port() -> None:
         )
 
 
+def test_rejects_invalid_dev_server_timeout() -> None:
+    with pytest.raises(ConfigError):
+        backend.PreviewConfig.from_config(
+            {"dev_server_start_timeout_seconds": 0},
+            config_path=Path("takopi.toml"),
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [

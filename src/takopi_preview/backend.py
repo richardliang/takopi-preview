@@ -91,6 +91,7 @@ class PreviewConfig:
     path_prefix: str
     start_port: int | None
     start_instruction: str | None
+    dev_server_start_timeout_seconds: int
 
     @classmethod
     def from_config(cls, config: object, *, config_path: Path) -> "PreviewConfig":
@@ -169,6 +170,16 @@ class PreviewConfig:
         )
         if start_instruction is not None:
             start_instruction = start_instruction.strip() or None
+        dev_server_start_timeout_seconds = _optional_int(
+            config, "dev_server_start_timeout_seconds", config_path=config_path
+        )
+        if dev_server_start_timeout_seconds is None:
+            dev_server_start_timeout_seconds = DEV_SERVER_START_TIMEOUT_SECONDS
+        if dev_server_start_timeout_seconds <= 0:
+            raise ConfigError(
+                f"Invalid `preview.dev_server_start_timeout_seconds` in {config_path}; "
+                "expected a positive integer."
+            )
 
         return cls(
             ttl_minutes=ttl_minutes,
@@ -179,6 +190,7 @@ class PreviewConfig:
             path_prefix=path_prefix,
             start_port=start_port,
             start_instruction=start_instruction,
+            dev_server_start_timeout_seconds=dev_server_start_timeout_seconds,
         )
 
 
@@ -870,14 +882,14 @@ async def _ensure_dev_server_ready(
     ready = await _wait_for_port_open(
         hosts,
         port,
-        timeout_seconds=DEV_SERVER_START_TIMEOUT_SECONDS,
+        timeout_seconds=config.dev_server_start_timeout_seconds,
         interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
     )
     if not ready:
         host_label = ", ".join(hosts)
         raise ConfigError(
             f"Dev server did not start on {host_label}:{port} within "
-            f"{DEV_SERVER_START_TIMEOUT_SECONDS:.0f}s."
+            f"{config.dev_server_start_timeout_seconds:.0f}s."
         )
 
 
