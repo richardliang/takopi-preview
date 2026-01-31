@@ -338,6 +338,20 @@ def test_parse_start_args_uses_default_instruction_with_port() -> None:
     assert instruction == "use pnpm dev"
 
 
+def test_resolve_context_uses_executor_default() -> None:
+    class DummyExecutor:
+        def __init__(self, default_context: object | None) -> None:
+            self.default_context = default_context
+
+    class DummyContext:
+        def __init__(self, default_context: object | None) -> None:
+            self.executor = DummyExecutor(default_context)
+
+    ctx = DummyContext(default_context="ctx-default")
+    assert backend._resolve_context(ctx, None) == "ctx-default"
+    assert backend._resolve_context(ctx, "ctx-resolved") == "ctx-resolved"
+
+
 def test_start_requires_valid_port() -> None:
     with pytest.raises(ConfigError):
         backend._validate_port(0)
