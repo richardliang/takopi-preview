@@ -121,7 +121,7 @@ Optional `~/.takopi/takopi.toml` to auto-start Metro with bun:
 [plugins.preview.projects.zkp2p-mobile]
 path_prefix = "/"
 start_port = 8081
-start_instruction = "use bun install && bun run start:dev -- --host localhost --port 8081"
+start_instruction = "use bun install && bun start:dev"
 ```
 
 `metro.config.js` example:
