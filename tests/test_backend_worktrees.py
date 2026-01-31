@@ -346,6 +346,49 @@ def test_parse_start_args_uses_default_instruction_with_port() -> None:
     assert instruction == "use pnpm dev"
 
 
+def test_ensure_dev_server_ready_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def runner() -> None:
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        done = asyncio.Event()
+
+        class DummyExecutor:
+            async def run_one(self, _request) -> None:
+                started.set()
+                try:
+                    await finish.wait()
+                finally:
+                    done.set()
+
+        class DummyContext:
+            executor = DummyExecutor()
+
+        async def fake_wait_for_port_open(*_args, **_kwargs) -> bool:
+            return True
+
+        monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait_for_port_open)
+        config = backend.PreviewConfig.from_config({}, config_path=Path("takopi.toml"))
+
+        await asyncio.wait_for(
+            backend._ensure_dev_server_ready(
+                ctx=DummyContext(),
+                config=config,
+                port=5173,
+                instruction=None,
+                context=None,
+                context_line=None,
+                cwd=None,
+                worktree_path=None,
+            ),
+            timeout=1.0,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        finish.set()
+        await asyncio.wait_for(done.wait(), timeout=1.0)
+
+    asyncio.run(runner())
+
+
 def test_resolve_context_uses_executor_default() -> None:
     class DummyExecutor:
         def __init__(self, default_context: object | None) -> None:
