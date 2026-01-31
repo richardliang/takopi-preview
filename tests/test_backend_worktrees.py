@@ -511,3 +511,56 @@ def test_start_clears_tailscale_conflict() -> None:
     assert calls["off"] == 1
     assert calls["on"] == 1
     assert session.port == 5173
+
+
+def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"run_one": 0, "run_background": 0}
+
+    class DummyExecutor:
+        def run_background(self, _request) -> None:
+            calls["run_background"] += 1
+            return None
+
+        async def run_one(self, _request) -> None:
+            calls["run_one"] += 1
+            await asyncio.sleep(0)
+            return None
+
+    class DummyContext:
+        def __init__(self) -> None:
+            self.executor = DummyExecutor()
+
+    async def fake_wait(*_args, **_kwargs) -> bool:
+        await asyncio.sleep(0)
+        return True
+
+    monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait)
+    monkeypatch.setattr(backend, "_probe_hosts", lambda _config: ("127.0.0.1",))
+
+    config = backend.PreviewConfig(
+        ttl_minutes=1,
+        allowed_user_ids=None,
+        tailscale_bin="tailscale",
+        tailscale_https_port=None,
+        local_host="127.0.0.1",
+        path_prefix="/preview",
+        start_port=None,
+        start_instruction=None,
+        dev_server_start_timeout_seconds=1,
+    )
+
+    asyncio.run(
+        backend._ensure_dev_server_ready(
+            ctx=DummyContext(),
+            config=config,
+            port=5173,
+            instruction=None,
+            context=None,
+            context_line=None,
+            cwd=None,
+            worktree_path=None,
+        )
+    )
+
+    assert calls["run_one"] == 1
+    assert calls["run_background"] == 0
