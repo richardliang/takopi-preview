@@ -274,11 +274,13 @@ def test_rejects_removed_dev_server_settings(payload: dict) -> None:
 
 def test_parse_start_args_requires_port() -> None:
     with pytest.raises(ConfigError):
-        backend._parse_start_args(())
+        backend._parse_start_args((), default_port=None, default_instruction=None)
 
 
 def test_parse_start_args_port_only() -> None:
-    port, instruction = backend._parse_start_args(("5173",))
+    port, instruction = backend._parse_start_args(
+        ("5173",), default_port=None, default_instruction=None
+    )
     assert port == 5173
     assert instruction == "5173"
 
@@ -286,6 +288,8 @@ def test_parse_start_args_port_only() -> None:
 def test_parse_start_args_includes_instruction() -> None:
     port, instruction = backend._parse_start_args(
         ("8081", "dev", "server", "for", "expo"),
+        default_port=None,
+        default_instruction=None,
     )
     assert port == 8081
     assert instruction == "8081 dev server for expo"
@@ -294,6 +298,8 @@ def test_parse_start_args_includes_instruction() -> None:
 def test_parse_start_args_allows_flag_like_instruction() -> None:
     port, instruction = backend._parse_start_args(
         ("5173", "use", "pnpm", "dev", "--host", "127.0.0.1", "--no-open"),
+        default_port=None,
+        default_instruction=None,
     )
     assert port == 5173
     assert instruction == "5173 use pnpm dev --host 127.0.0.1 --no-open"
@@ -301,7 +307,35 @@ def test_parse_start_args_allows_flag_like_instruction() -> None:
 
 def test_parse_start_args_rejects_invalid_port() -> None:
     with pytest.raises(ConfigError):
-        backend._parse_start_args(("dev", "server", "8081"))
+        backend._parse_start_args(
+            ("dev", "server", "8081"),
+            default_port=None,
+            default_instruction=None,
+        )
+
+
+def test_parse_start_args_uses_default_port() -> None:
+    port, instruction = backend._parse_start_args(
+        (), default_port=5173, default_instruction="use pnpm dev"
+    )
+    assert port == 5173
+    assert instruction == "use pnpm dev"
+
+
+def test_parse_start_args_uses_default_port_with_instruction() -> None:
+    port, instruction = backend._parse_start_args(
+        ("use", "pnpm", "dev"), default_port=5173, default_instruction=None
+    )
+    assert port == 5173
+    assert instruction == "use pnpm dev"
+
+
+def test_parse_start_args_uses_default_instruction_with_port() -> None:
+    port, instruction = backend._parse_start_args(
+        ("5173",), default_port=None, default_instruction="use pnpm dev"
+    )
+    assert port == 5173
+    assert instruction == "use pnpm dev"
 
 
 def test_start_requires_valid_port() -> None:
