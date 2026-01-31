@@ -856,15 +856,6 @@ async def _wait_for_port_open(
         await asyncio.sleep(interval_seconds)
 
 
-def _log_run_task_exception(task: asyncio.Task[object]) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("preview.dev_server_start_failed")
-
-
 async def _ensure_dev_server_ready(
     *,
     ctx: CommandContext,
@@ -889,8 +880,7 @@ async def _ensure_dev_server_ready(
         instruction=instruction,
     )
     request = RunRequest(prompt=prompt, context=_as_run_context(context))
-    run_task = asyncio.create_task(ctx.executor.run_one(request))
-    run_task.add_done_callback(_log_run_task_exception)
+    await ctx.executor.run_one(request)
     ready = await _wait_for_port_open(
         hosts,
         port,
@@ -898,8 +888,6 @@ async def _ensure_dev_server_ready(
         interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
     )
     if not ready:
-        if not run_task.done():
-            run_task.cancel()
         host_label = ", ".join(hosts)
         raise ConfigError(
             f"Dev server did not start on {host_label}:{port} within "
