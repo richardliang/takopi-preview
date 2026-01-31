@@ -51,6 +51,8 @@ DEV_SERVER_START_PROMPT = (
     "correct dev server and leave it running.\n"
     "- If nothing is listening, find the right dev command from README, "
     "AGENTS, or package scripts and start it.\n"
+    "- Start the dev server in a detached/background session so it keeps running "
+    "after this command finishes.\n"
     "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
     "uv > poetry > pip for Python).\n"
     "- Install dependencies only if required to start the dev server.\n"
