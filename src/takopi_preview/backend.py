@@ -89,6 +89,8 @@ class PreviewConfig:
     tailscale_https_port: int | None
     local_host: str
     path_prefix: str
+    start_port: int | None
+    start_instruction: str | None
 
     @classmethod
     def from_config(cls, config: object, *, config_path: Path) -> "PreviewConfig":
@@ -159,6 +161,14 @@ class PreviewConfig:
         path_prefix = _normalize_path_prefix(
             _optional_str(config, "path_prefix", config_path=config_path) or PATH_PREFIX
         )
+        start_port = _optional_int(config, "start_port", config_path=config_path)
+        if start_port is not None:
+            _validate_port(start_port)
+        start_instruction = _optional_str(
+            config, "start_instruction", config_path=config_path
+        )
+        if start_instruction is not None:
+            start_instruction = start_instruction.strip() or None
 
         return cls(
             ttl_minutes=ttl_minutes,
@@ -167,6 +177,8 @@ class PreviewConfig:
             tailscale_https_port=tailscale_https_port,
             local_host=local_host,
             path_prefix=path_prefix,
+            start_port=start_port,
+            start_instruction=start_instruction,
         )
 
 
@@ -458,7 +470,11 @@ class PreviewCommand:
 
         command = ctx.args[0].lower()
         if command in {"start", "on"}:
-            port, instruction = _parse_start_args(ctx.args[1:])
+            port, instruction = _parse_start_args(
+                ctx.args[1:],
+                default_port=config.start_port,
+                default_instruction=config.start_instruction,
+            )
             _validate_port(port)
             worktree_path, repo_root = _require_worktree(cwd)
             await _ensure_dev_server_ready(
@@ -684,19 +700,32 @@ def _parse_port(arg: str | None) -> int | None:
 
 def _parse_start_args(
     args: tuple[str, ...],
+    *,
+    default_port: int | None,
+    default_instruction: str | None,
 ) -> tuple[int, str | None]:
     if not args:
-        raise ConfigError(_usage_preview_start())
+        if default_port is None:
+            raise ConfigError(_usage_preview_start())
+        instruction = (default_instruction or "").strip() or None
+        return default_port, instruction
     port_token = args[0]
     parsed = _parse_port(port_token)
     if parsed is None:
-        raise ConfigError(f"Invalid port {port_token!r}.")
+        if default_port is None:
+            raise ConfigError(f"Invalid port {port_token!r}.")
+        instruction = " ".join(args).strip()
+        if not instruction:
+            instruction = (default_instruction or "").strip() or None
+        return default_port, instruction or None
     instruction = " ".join(args).strip()
+    if len(args) == 1 and default_instruction:
+        return parsed, default_instruction.strip() or None
     return parsed, instruction or None
 
 
 def _usage_preview_start() -> str:
-    return "usage: `/preview start <port> [instruction...]`"
+    return "usage: `/preview start [port] [instruction...]`"
 
 
 def _normalize_path_prefix(prefix: str) -> str:
@@ -1311,7 +1340,7 @@ def _format_age(started_at: float) -> str:
 def _help_text() -> str:
     return (
         "preview commands:\n"
-        "/preview start <port> [instruction...]\n"
+        "/preview start [port] [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"
