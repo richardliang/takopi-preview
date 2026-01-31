@@ -115,6 +115,15 @@ Start the dev server (or rely on `/preview start`), then run `/preview start 517
 Metro expects requests at the root path, so use `path_prefix = "/"` and a
 dedicated HTTPS port for the Metro port (example: 8081).
 
+Optional `~/.takopi/takopi.toml` to auto-start Metro with bun:
+
+```toml
+[plugins.preview.projects.zkp2p-mobile]
+path_prefix = "/"
+start_port = 8081
+start_instruction = "use bun install && bun run start:dev -- --host localhost --port 8081"
+```
+
 `metro.config.js` example:
 
 ```js
