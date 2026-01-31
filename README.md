@@ -25,13 +25,13 @@ provider = "tailscale"
 
 ```
 /myapp @feat/login
-/preview start 5173 use pnpm dev -- --host 127.0.0.1 --port 5173
+/preview start <port> use pnpm dev -- --host 127.0.0.1 --port <port>
 ```
 
 Open the returned URL, then stop when done:
 
 ```
-/preview stop 5173
+/preview stop
 ```
 
 ## commands
@@ -78,8 +78,8 @@ worktree before enabling Tailscale Serve.
 - if the port is closed, Takopi finds the right dev command (README, AGENTS,
   package scripts) and starts it, preferring pnpm > bun > npm > yarn or
   uv > poetry > pip.
-- Takopi starts the dev server in a detached/background session so it keeps
-  running after the command finishes (nohup/setsid/disown, with logs redirected).
+- Takopi starts the dev server in the foreground and keeps the run alive; avoid
+  nohup/setsid/disown so the session stays attached.
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
   port; `/preview start` waits up to `dev_server_start_timeout_seconds` for the
   port to open (default: 90s).
@@ -92,7 +92,7 @@ instruction text.
 You can include flags directly in the instruction:
 
 ```
-/preview start 5173 use pnpm dev --host 127.0.0.1 --port 5173
+/preview start <port> use pnpm dev --host 127.0.0.1 --port <port>
 ```
 
 `/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
@@ -112,7 +112,7 @@ server: {
 },
 ```
 
-Start the dev server (or rely on `/preview start`), then run `/preview start 5173`.
+Start the dev server (or rely on `/preview start`), then run `/preview start <port>`.
 
 ### react native (metro)
 

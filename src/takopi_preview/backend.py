@@ -51,8 +51,8 @@ DEV_SERVER_START_PROMPT = (
     "correct dev server and leave it running.\n"
     "- If nothing is listening, find the right dev command from README, "
     "AGENTS, or package scripts and start it.\n"
-    "- Start the dev server in a detached/background session so it keeps running "
-    "after this command finishes. Use nohup/setsid/disown and redirect logs.\n"
+    "- Start the dev server in the foreground and keep it running; do not "
+    "detach with nohup/setsid/disown.\n"
     "- Do not use `timeout` for the server process.\n"
     "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
     "uv > poetry > pip for Python).\n"
@@ -856,15 +856,6 @@ async def _wait_for_port_open(
         await asyncio.sleep(interval_seconds)
 
 
-def _log_background_task_exception(task: asyncio.Task[object]) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("preview.dev_server_start_failed")
-
-
 async def _ensure_dev_server_ready(
     *,
     ctx: CommandContext,
@@ -889,17 +880,7 @@ async def _ensure_dev_server_ready(
         instruction=instruction,
     )
     request = RunRequest(prompt=prompt, context=_as_run_context(context))
-    background_runner = getattr(ctx.executor, "run_background", None)
-    run_task: asyncio.Task[object] | None = None
-    if callable(background_runner):
-        result = background_runner(request)
-        if asyncio.iscoroutine(result):
-            result = await result
-        if isinstance(result, asyncio.Task):
-            run_task = result
-    if run_task is None:
-        run_task = asyncio.create_task(ctx.executor.run_one(request))
-    run_task.add_done_callback(_log_background_task_exception)
+    await ctx.executor.run_one(request)
     ready = await _wait_for_port_open(
         hosts,
         port,
@@ -907,8 +888,6 @@ async def _ensure_dev_server_ready(
         interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
     )
     if not ready:
-        if not run_task.done():
-            run_task.cancel()
         host_label = ", ".join(hosts)
         raise ConfigError(
             f"Dev server did not start on {host_label}:{port} within "

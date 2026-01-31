@@ -1,1 +1,3 @@
 CONTINUITY.md
+__pycache__/
+*.pyc
