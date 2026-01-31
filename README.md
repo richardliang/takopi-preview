@@ -54,6 +54,7 @@ local_host = "127.0.0.1"
 tailscale_bin = "tailscale"
 start_port = 5173
 start_instruction = "use pnpm dev -- --host 127.0.0.1 --port 5173"
+dev_server_start_timeout_seconds = 600
 
 [plugins.preview.projects.myapp]
 path_prefix = "/preview"
@@ -78,7 +79,8 @@ worktree before enabling Tailscale Serve.
   package scripts) and starts it, preferring pnpm > bun > npm > yarn or
   uv > poetry > pip.
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
-  port; `/preview start` waits up to ~90s for the port to open.
+  port; `/preview start` waits up to `dev_server_start_timeout_seconds` for the
+  port to open (default: 90s).
 
 All text after `/preview start` is forwarded to Takopi. If `start_port` is not
 configured, the preview port must be the first argument. When `start_port` is
