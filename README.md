@@ -79,7 +79,7 @@ worktree before enabling Tailscale Serve.
   package scripts) and starts it, preferring pnpm > bun > npm > yarn or
   uv > poetry > pip.
 - Takopi starts the dev server in a detached/background session so it keeps
-  running after the command finishes.
+  running after the command finishes (nohup/setsid/disown, with logs redirected).
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
   port; `/preview start` waits up to `dev_server_start_timeout_seconds` for the
   port to open (default: 90s).
