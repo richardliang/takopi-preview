@@ -455,7 +455,7 @@ class PreviewCommand:
             reply_text=ctx.reply_text,
             chat_id=_coerce_chat_id(ctx.message.channel_id),
         )
-        context = resolved.context
+        context = _resolve_context(ctx, resolved.context)
         context_line = ctx.runtime.format_context_line(context)
         cwd = ctx.runtime.resolve_run_cwd(context)
         config = _load_config(ctx, context)
@@ -548,6 +548,18 @@ def _arg(args: tuple[str, ...], index: int) -> str | None:
 def _coerce_chat_id(value: Any) -> int | None:
     if isinstance(value, int):
         return value
+    return None
+
+
+def _resolve_context(
+    ctx: CommandContext,
+    resolved_context: object | None,
+) -> object | None:
+    if resolved_context is not None:
+        return resolved_context
+    default_context = getattr(ctx.executor, "default_context", None)
+    if default_context is not None:
+        return default_context
     return None
 
 
