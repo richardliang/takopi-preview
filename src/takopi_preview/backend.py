@@ -544,7 +544,7 @@ class PreviewCommand:
                 ctx.args[1:], default_port=server_config.start_port
             )
             instruction = instruction or server_config.start_instruction
-            worktree_path, _repo_root = _require_worktree(cwd)
+            worktree_path, _repo_root = _require_worktree(cwd, action="preview server")
             prompt = _build_start_prompt(
                 host=server_config.host,
                 port=port,
@@ -563,7 +563,9 @@ class PreviewCommand:
                 ctx.args[1:], default_port=server_config.start_port
             )
             instruction = instruction or server_config.stop_instruction
-            worktree_path, _repo_root = _require_worktree(cwd)
+            worktree_path, _repo_root = _require_worktree(
+                cwd, action="preview kill-server"
+            )
             prompt = _build_stop_prompt(
                 port=port,
                 prompt_context=PromptContext(
@@ -806,21 +808,25 @@ def _validate_port(port: int) -> None:
         )
 
 
-def _require_worktree(cwd: Path | None) -> tuple[Path, Path]:
+def _require_worktree(
+    cwd: Path | None, *, action: str = "preview start"
+) -> tuple[Path, Path]:
     if cwd is None:
-        raise ConfigError("preview start requires a worktree; specify a project/branch.")
+        raise ConfigError(
+            f"{action} requires a worktree; specify a project/branch."
+        )
     top = git_stdout(
         ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
     )
     if not top:
-        raise ConfigError("preview start requires a git worktree.")
+        raise ConfigError(f"{action} requires a git worktree.")
     worktree_path = Path(top).resolve(strict=False)
     repo_root = resolve_main_worktree_root(worktree_path)
     if repo_root is None:
-        raise ConfigError("preview start requires a git worktree.")
+        raise ConfigError(f"{action} requires a git worktree.")
     repo_root = repo_root.resolve(strict=False)
     if worktree_path == repo_root:
-        raise ConfigError("preview start requires a worktree (not the main repo).")
+        raise ConfigError(f"{action} requires a worktree (not the main repo).")
     return worktree_path, repo_root
 
 
