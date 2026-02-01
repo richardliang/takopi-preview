@@ -346,7 +346,9 @@ def test_parse_start_args_uses_default_instruction_with_port() -> None:
     assert instruction == "use pnpm dev"
 
 
-def test_ensure_dev_server_ready_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_dev_server_ready_waits_for_run_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def runner() -> None:
         started = asyncio.Event()
         finish = asyncio.Event()
@@ -369,7 +371,7 @@ def test_ensure_dev_server_ready_does_not_block(monkeypatch: pytest.MonkeyPatch)
         monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait_for_port_open)
         config = backend.PreviewConfig.from_config({}, config_path=Path("takopi.toml"))
 
-        await asyncio.wait_for(
+        task = asyncio.create_task(
             backend._ensure_dev_server_ready(
                 ctx=DummyContext(),
                 config=config,
@@ -379,12 +381,13 @@ def test_ensure_dev_server_ready_does_not_block(monkeypatch: pytest.MonkeyPatch)
                 context_line=None,
                 cwd=None,
                 worktree_path=None,
-            ),
-            timeout=1.0,
+            )
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert not task.done()
         finish.set()
         await asyncio.wait_for(done.wait(), timeout=1.0)
+        await asyncio.wait_for(task, timeout=1.0)
 
     asyncio.run(runner())
 
