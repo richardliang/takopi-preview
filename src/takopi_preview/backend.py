@@ -97,6 +97,7 @@ class PreviewConfig:
     start_port: int | None
     start_instruction: str | None
     dev_server_start_timeout_seconds: int
+    start_wait_for_port: bool
 
     @classmethod
     def from_config(cls, config: object, *, config_path: Path) -> "PreviewConfig":
@@ -185,6 +186,11 @@ class PreviewConfig:
                 f"Invalid `preview.dev_server_start_timeout_seconds` in {config_path}; "
                 "expected a positive integer."
             )
+        start_wait_for_port = _optional_bool(
+            config, "start_wait_for_port", config_path=config_path
+        )
+        if start_wait_for_port is None:
+            start_wait_for_port = True
 
         return cls(
             ttl_minutes=ttl_minutes,
@@ -196,6 +202,7 @@ class PreviewConfig:
             start_port=start_port,
             start_instruction=start_instruction,
             dev_server_start_timeout_seconds=dev_server_start_timeout_seconds,
+            start_wait_for_port=start_wait_for_port,
         )
 
 
@@ -655,6 +662,24 @@ def _optional_int(config: dict[str, Any], key: str, *, config_path: Path) -> int
     raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected an int.")
 
 
+def _optional_bool(
+    config: dict[str, Any],
+    key: str,
+    *,
+    config_path: Path,
+) -> bool | None:
+    if key not in config:
+        return None
+    value = config.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(
+        f"Invalid `preview.{key}` in {config_path}; expected a boolean."
+    )
+
+
 def _optional_int_set(
     config: dict[str, Any], key: str, *, config_path: Path
 ) -> set[int] | None:
@@ -879,6 +904,9 @@ async def _ensure_dev_server_ready(
     worktree_path: Path | None,
 ) -> None:
     hosts = _probe_hosts(config)
+    for host in hosts:
+        if await asyncio.to_thread(_is_port_open, host, port):
+            return
     prompt_context = PromptContext(
         context_line=context_line,
         cwd=cwd,
@@ -919,6 +947,8 @@ async def _ensure_dev_server_ready(
     if not launched_in_background:
         run_task = asyncio.create_task(ctx.executor.run_one(request))
         run_task.add_done_callback(_log_background_task_exception)
+    if not config.start_wait_for_port:
+        return
     ready = await _wait_for_port_open(
         hosts,
         port,

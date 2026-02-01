@@ -372,6 +372,7 @@ def test_ensure_dev_server_ready_does_not_block_on_background(
             return True
 
         monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait_for_port_open)
+        monkeypatch.setattr(backend, "_is_port_open", lambda *_args, **_kwargs: False)
         config = backend.PreviewConfig.from_config({}, config_path=Path("takopi.toml"))
 
         await asyncio.wait_for(
@@ -538,6 +539,7 @@ def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait)
     monkeypatch.setattr(backend, "_probe_hosts", lambda _config: ("127.0.0.1",))
+    monkeypatch.setattr(backend, "_is_port_open", lambda *_args, **_kwargs: False)
 
     config = backend.PreviewConfig(
         ttl_minutes=1,
@@ -549,6 +551,7 @@ def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -
         start_port=None,
         start_instruction=None,
         dev_server_start_timeout_seconds=1,
+        start_wait_for_port=True,
     )
 
     asyncio.run(
@@ -565,3 +568,53 @@ def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert calls["run_one"] == 1
+
+
+def test_ensure_dev_server_ready_skips_wait_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"wait": 0}
+
+    class DummyExecutor:
+        async def run_one(self, _request) -> None:
+            await asyncio.sleep(0)
+
+    class DummyContext:
+        def __init__(self) -> None:
+            self.executor = DummyExecutor()
+
+    async def fake_wait(*_args, **_kwargs) -> bool:
+        calls["wait"] += 1
+        return True
+
+    monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait)
+    monkeypatch.setattr(backend, "_probe_hosts", lambda _config: ("127.0.0.1",))
+    monkeypatch.setattr(backend, "_is_port_open", lambda *_args, **_kwargs: False)
+
+    config = backend.PreviewConfig(
+        ttl_minutes=1,
+        allowed_user_ids=None,
+        tailscale_bin="tailscale",
+        tailscale_https_port=None,
+        local_host="127.0.0.1",
+        path_prefix="/preview",
+        start_port=None,
+        start_instruction=None,
+        dev_server_start_timeout_seconds=1,
+        start_wait_for_port=False,
+    )
+
+    asyncio.run(
+        backend._ensure_dev_server_ready(
+            ctx=DummyContext(),
+            config=config,
+            port=5173,
+            instruction=None,
+            context=None,
+            context_line=None,
+            cwd=None,
+            worktree_path=None,
+        )
+    )
+
+    assert calls["wait"] == 0
