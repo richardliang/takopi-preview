@@ -21,11 +21,11 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 provider = "tailscale"
 ```
 
-4. in chat, pick a worktree context and start a preview:
+4. start your dev server, then in chat pick a worktree context and start a preview:
 
 ```
 /myapp @feat/login
-/preview start 5173 use pnpm dev -- --host 127.0.0.1 --port 5173
+/preview start 5173
 ```
 
 Open the returned URL, then stop when done:
@@ -36,7 +36,7 @@ Open the returned URL, then stop when done:
 
 ## commands
 
-- `/preview start [port] [instruction...]`: start a preview for the current context
+- `/preview start [port]`: start a preview for the current context
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
@@ -53,12 +53,10 @@ allowed_user_ids = [123456789]
 local_host = "127.0.0.1"
 tailscale_bin = "tailscale"
 start_port = 5173
-start_instruction = "use pnpm dev -- --host 127.0.0.1 --port 5173"
 
 [plugins.preview.projects.myapp]
 path_prefix = "/preview"
 start_port = 3000
-start_instruction = "start web subrepo dev server only"
 ```
 
 Notes:
@@ -67,32 +65,11 @@ Notes:
 - `ttl_minutes = 0` disables expiration.
 - empty `allowed_user_ids` means no allowlist enforcement.
 
-## dev server prompting
+## dev server lifecycle
 
-`/preview start` asks Takopi to ensure the dev server is running for the current
-worktree before enabling Tailscale Serve.
-
-- if the target port is already listening, Takopi confirms it is the right
-  server and leaves it running.
-- if the port is closed, Takopi finds the right dev command (README, AGENTS,
-  package scripts) and starts it, preferring pnpm > bun > npm > yarn or
-  uv > poetry > pip.
-- the server should bind to `local_host` (default `127.0.0.1`) and the requested
-  port; `/preview start` waits up to ~90s for the port to open.
-
-All text after `/preview start` is forwarded to Takopi. If `start_port` is not
-configured, the preview port must be the first argument. When `start_port` is
-set, `/preview start` uses it by default and any arguments are treated as
-instruction text.
-
-You can include flags directly in the instruction:
-
-```
-/preview start 5173 use pnpm dev --host 127.0.0.1 --port 5173
-```
-
-`/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
-still listening on the preview port.
+takopi-preview no longer starts or stops dev servers. Run your dev server
+manually, then use `/preview start` to expose it and `/preview stop` to disable
+the Tailscale Serve entry.
 
 ## common setups
 
@@ -108,7 +85,7 @@ server: {
 },
 ```
 
-Start the dev server (or rely on `/preview start`), then run `/preview start 5173`.
+Start the dev server, then run `/preview start 5173`.
 
 ### react native (metro)
 
