@@ -802,6 +802,13 @@ def _probe_hosts(config: PreviewConfig) -> tuple[str, ...]:
     return (host or "127.0.0.1",)
 
 
+def _display_host(config: PreviewConfig) -> str:
+    host = config.local_host.strip()
+    if host:
+        return host
+    return "127.0.0.1"
+
+
 def _format_prompt_context(prompt_context: PromptContext) -> str:
     return prompt_context.context_line or "none"
 
@@ -915,7 +922,7 @@ async def _ensure_dev_server_ready(
         worktree_path=worktree_path,
     )
     prompt = _build_dev_server_start_prompt(
-        host=hosts[0],
+        host=_display_host(config),
         port=port,
         prompt_context=prompt_context,
         instruction=instruction,
