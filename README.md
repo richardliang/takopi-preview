@@ -21,7 +21,7 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 provider = "tailscale"
 ```
 
-4. start your dev server (or use `/preview server`), then in chat pick a worktree
+4. start your dev server (or use `/preview server` or `/preview up`), then in chat pick a worktree
    context and start a preview:
 
 ```
@@ -39,6 +39,7 @@ Open the returned URL, then stop when done:
 
 - `/preview start [port]`: start a preview for the current context
 - `/preview server [port] [instruction...]`: ask the engine to start a dev server
+- `/preview up [port] [instruction...]`: start the dev server, then enable the preview
 - `/preview kill-server [port] [instruction...]`: ask the engine to stop a dev server
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
@@ -84,6 +85,7 @@ takopi-preview does not auto-manage dev servers for you, but it does ship
 helpers that forward a standardized prompt to the engine:
 
 - `/preview server [port] [instruction...]` (start)
+- `/preview up [port] [instruction...]` (start + preview)
 - `/preview kill-server [port] [instruction...]` (stop)
 
 You can still start servers manually, then use `/preview start` to expose them
