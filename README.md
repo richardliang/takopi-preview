@@ -25,7 +25,7 @@ provider = "tailscale"
 
 ```
 /myapp @feat/login
-/preview start <port> use pnpm dev -- --host 127.0.0.1 --port <port>
+/preview start <port> use pnpm dev -- --host localhost --port <port>
 ```
 
 Open the returned URL, then stop when done:
@@ -53,7 +53,7 @@ allowed_user_ids = [123456789]
 local_host = "localhost"
 tailscale_bin = "tailscale"
 start_port = 5173
-start_instruction = "use pnpm dev -- --host 127.0.0.1 --port 5173"
+start_instruction = "use pnpm dev -- --host localhost --port 5173"
 dev_server_start_timeout_seconds = 600
 start_wait_for_port = true
 
@@ -74,15 +74,10 @@ Notes:
 `/preview start` asks Takopi to ensure the dev server is running for the current
 worktree before enabling Tailscale Serve.
 
-- if the target port is already listening, Takopi assumes it is the right
-  server and leaves it running (no diagnostics).
+- if the target port is already listening, Takopi leaves it running.
 - if the port is closed, Takopi finds the right dev command (README, AGENTS,
-  package scripts) and starts it, preferring pnpm > bun > npm > yarn or
-  uv > poetry > pip.
-- if you include a specific command in the instruction, Takopi runs it exactly
-  without rewriting host/port.
-- Takopi starts the dev server in a detached/background session so it keeps
-  running after the command finishes (nohup/setsid/disown, with logs redirected).
+  package scripts) and starts it.
+- if you include a specific command in the instruction, Takopi runs it exactly.
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested
   port; `/preview start` waits up to `dev_server_start_timeout_seconds` for the
   port to open (default: 90s). Set `start_wait_for_port = false` to return
@@ -96,7 +91,7 @@ instruction text.
 You can include flags directly in the instruction:
 
 ```
-/preview start <port> use pnpm dev --host 127.0.0.1 --port <port>
+/preview start <port> use pnpm dev --host localhost --port <port>
 ```
 
 `/preview stop` and `/preview killall` ask Takopi to stop the dev server if it is
@@ -164,10 +159,8 @@ to the tailnet IP by running Metro with `--host 0.0.0.0`.
   you need multiple concurrent previews.
 - tailscale: the default HTTPS port is `443`, so previews map to
   `https://host.ts.net/preview/<port>` (or `https://host.ts.net/` when
-  `path_prefix = "/"`). Set `tailscale_https_port = 0` to use the preview
-  port (for `https://host.ts.net:3000/`). When using per-port HTTPS, start the
-  dev server on `127.0.0.1` (no `--host 0.0.0.0`) so tailscale can bind the
-  public port without conflicts.
+  `path_prefix = "/"`). Set `tailscale_https_port = 0` to use a prefixed HTTPS
+  port (for example, `8081` -> `18081`) to avoid local port conflicts.
 
 `ttl_minutes` controls automatic expiration for previews started by this takopi
 process; expired sessions are cleaned up on the next command invocation.

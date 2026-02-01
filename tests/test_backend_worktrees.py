@@ -210,6 +210,10 @@ def test_active_worktree_sessions_are_retained(tmp_path: Path) -> None:
 
 
 def test_killall_includes_urls() -> None:
+    config = backend.PreviewConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
     session = backend.PreviewSession(
         session_id="sess-3",
         project="proj",
@@ -220,7 +224,7 @@ def test_killall_includes_urls() -> None:
         last_seen=time.time(),
         context_line=None,
     )
-    output = backend._format_killall([session])
+    output = backend._format_killall([session], config=config)
     assert "https://example/preview/5175" in output
 
 
@@ -463,7 +467,7 @@ def test_build_url_uses_port_for_root_path() -> None:
         override = replace(config, tailscale_https_port=0)
         assert (
             backend._build_url(config=override, port=5173)
-            == "https://host.ts.net:5173"
+            == "https://host.ts.net:15173"
         )
     finally:
         backend._get_dns_name = original
