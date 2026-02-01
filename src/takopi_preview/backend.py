@@ -569,34 +569,16 @@ class PreviewCommand:
                 repo_root=repo_root,
             )
             return CommandResult(text=_format_started(session))
-        if command in {"server", "start-server"}:
+        if command in {"down"}:
             server_config = _load_server_config(ctx, context)
             port, instruction = _parse_server_args(
-                ctx.args[1:], default_port=server_config.start_port
-            )
-            instruction = instruction or server_config.start_instruction
-            worktree_path, _repo_root = _require_worktree(cwd, action="preview server")
-            prompt = _build_start_prompt(
-                host=server_config.host,
-                port=port,
-                prompt_context=PromptContext(
-                    context_line=context_line, cwd=worktree_path
-                ),
-                instruction=instruction,
-            )
-            await ctx.executor.run_one(
-                RunRequest(prompt=prompt, context=_as_run_context(context))
-            )
-            return None
-        if command in {"kill-server", "stop-server"}:
-            server_config = _load_server_config(ctx, context)
-            port, instruction = _parse_server_args(
-                ctx.args[1:], default_port=server_config.start_port
+                ctx.args[1:],
+                default_port=server_config.start_port,
+                usage=_usage_preview_down,
             )
             instruction = instruction or server_config.stop_instruction
-            worktree_path, _repo_root = _require_worktree(
-                cwd, action="preview kill-server"
-            )
+            worktree_path, _repo_root = _require_worktree(cwd, action="preview down")
+            _validate_port(port)
             prompt = _build_stop_prompt(
                 port=port,
                 prompt_context=PromptContext(
@@ -607,7 +589,13 @@ class PreviewCommand:
             await ctx.executor.run_one(
                 RunRequest(prompt=prompt, context=_as_run_context(context))
             )
-            return None
+            session = await MANAGER.find_session(
+                config=config,
+                arg=str(port),
+                context=context,
+            )
+            session = await MANAGER.stop(config=config, session=session)
+            return CommandResult(text=_format_stopped(session))
         if command == "list":
             sessions = await MANAGER.list_sessions(config=config)
             return CommandResult(text=_format_list(sessions))
@@ -897,7 +885,7 @@ def _parse_server_args(
     default_port: int | None,
     usage: Callable[[], str] | None = None,
 ) -> tuple[int, str | None]:
-    usage = usage or _usage_preview_server
+    usage = usage or _usage_preview_down
     if not args:
         if default_port is None:
             raise ConfigError(usage())
@@ -920,11 +908,8 @@ def _usage_preview_up() -> str:
     return "usage: `/preview up [port] [instruction...]`"
 
 
-def _usage_preview_server() -> str:
-    return (
-        "usage: `/preview server [port] [instruction...]` "
-        "or `/preview kill-server [port] [instruction...]`"
-    )
+def _usage_preview_down() -> str:
+    return "usage: `/preview down [port] [instruction...]`"
 
 
 def _normalize_path_prefix(prefix: str) -> str:
@@ -1425,8 +1410,7 @@ def _help_text() -> str:
         "preview commands:\n"
         "/preview start [port]\n"
         "/preview up [port] [instruction...]\n"
-        "/preview server [port] [instruction...]\n"
-        "/preview kill-server [port] [instruction...]\n"
+        "/preview down [port] [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"
