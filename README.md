@@ -79,6 +79,8 @@ worktree before enabling Tailscale Serve.
 - if the port is closed, Takopi finds the right dev command (README, AGENTS,
   package scripts) and starts it, preferring pnpm > bun > npm > yarn or
   uv > poetry > pip.
+- if you include a specific command in the instruction, Takopi runs it exactly
+  without rewriting host/port.
 - Takopi starts the dev server in a detached/background session so it keeps
   running after the command finishes (nohup/setsid/disown, with logs redirected).
 - the server should bind to `local_host` (default `127.0.0.1`) and the requested

@@ -51,6 +51,8 @@ DEV_SERVER_START_PROMPT = (
     "correct dev server and leave it running. Do not run diagnostics.\n"
     "- If nothing is listening, find the right dev command from README, "
     "AGENTS, or package scripts and start it.\n"
+    "- If the user instruction includes a specific command, run it exactly; do "
+    "not change host/port or add extra steps.\n"
     "- Start the dev server in a detached/background session so it keeps running "
     "after this command finishes. Use nohup/setsid/disown and redirect logs.\n"
     "- Do not use `timeout` for the server process.\n"
