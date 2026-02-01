@@ -9,7 +9,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from takopi.api import (
     CommandBackend,
@@ -538,6 +538,37 @@ class PreviewCommand:
                 repo_root=repo_root,
             )
             return CommandResult(text=_format_started(session))
+        if command in {"up", "dev"}:
+            server_config = _load_server_config(ctx, context)
+            port, instruction = _parse_server_args(
+                ctx.args[1:],
+                default_port=server_config.start_port,
+                usage=_usage_preview_up,
+            )
+            instruction = instruction or server_config.start_instruction
+            worktree_path, repo_root = _require_worktree(cwd, action="preview up")
+            prompt = _build_start_prompt(
+                host=server_config.host,
+                port=port,
+                prompt_context=PromptContext(
+                    context_line=context_line, cwd=worktree_path
+                ),
+                instruction=instruction,
+            )
+            await ctx.executor.run_one(
+                RunRequest(prompt=prompt, context=_as_run_context(context))
+            )
+            _validate_port(port)
+            session = await MANAGER.start(
+                config=config,
+                port=port,
+                context_line=context_line,
+                context=context,
+                cwd=cwd,
+                worktree_path=worktree_path,
+                repo_root=repo_root,
+            )
+            return CommandResult(text=_format_started(session))
         if command in {"server", "start-server"}:
             server_config = _load_server_config(ctx, context)
             port, instruction = _parse_server_args(
@@ -864,23 +895,29 @@ def _parse_server_args(
     args: tuple[str, ...],
     *,
     default_port: int | None,
+    usage: Callable[[], str] | None = None,
 ) -> tuple[int, str | None]:
+    usage = usage or _usage_preview_server
     if not args:
         if default_port is None:
-            raise ConfigError(_usage_preview_server())
+            raise ConfigError(usage())
         return default_port, None
     parsed = _parse_port(args[0])
     if parsed is not None:
         instruction = " ".join(args[1:]).strip() or None
         return parsed, instruction
     if default_port is None:
-        raise ConfigError(_usage_preview_server())
+        raise ConfigError(usage())
     instruction = " ".join(args).strip() or None
     return default_port, instruction
 
 
 def _usage_preview_start() -> str:
     return "usage: `/preview start [port]`"
+
+
+def _usage_preview_up() -> str:
+    return "usage: `/preview up [port] [instruction...]`"
 
 
 def _usage_preview_server() -> str:
@@ -1387,6 +1424,7 @@ def _help_text() -> str:
     return (
         "preview commands:\n"
         "/preview start [port]\n"
+        "/preview up [port] [instruction...]\n"
         "/preview server [port] [instruction...]\n"
         "/preview kill-server [port] [instruction...]\n"
         "/preview list\n"
