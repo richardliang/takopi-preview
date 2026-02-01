@@ -17,6 +17,8 @@ from takopi.api import (
     CommandResult,
     ConfigError,
     HOME_CONFIG_PATH,
+    RunContext,
+    RunRequest,
     get_logger,
 )
 from takopi.utils.git import git_stdout, resolve_main_worktree_root
@@ -27,9 +29,53 @@ SAFE_PORT_MIN = 1024
 SAFE_PORT_MAX = 65535
 DEFAULT_TTL_MINUTES = 120
 PATH_PREFIX = "/preview"
+DEFAULT_SERVER_HOST = "localhost"
 _PREVIEW_PORT_RE = re.compile(r"/preview/(\d+)")
 LOCAL_PROXY_PORT_RE = re.compile(
     r"http://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)"
+)
+
+DEV_SERVER_START_PROMPT = (
+    "You are operating within a Takopi worktree context.\n"
+    "\n"
+    "Goal: ensure the correct dev server is running.\n"
+    "\n"
+    "Target:\n"
+    "- host: {host}\n"
+    "- port: {port}\n"
+    "\n"
+    "Rules:\n"
+    "- If something is already listening on the target port, confirm it is the "
+    "correct dev server and leave it running.\n"
+    "- If nothing is listening, find the right dev command from README, "
+    "AGENTS, or package scripts and start it.\n"
+    "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
+    "uv > poetry > pip for Python).\n"
+    "- Install dependencies only if required to start the dev server.\n"
+    "- Bind to the target host and port; avoid public binds unless required.\n"
+    "\n"
+    "Edge cases:\n"
+    "- Monorepo with multiple apps: pick the app for this context and say which.\n"
+    "- If the default port differs, override it to {port} or explain why you "
+    "cannot.\n"
+    "- If startup fails, report the error and the next step.\n"
+    "\n"
+    "Context: {context_line}\n"
+    "Worktree: {worktree}\n"
+)
+
+DEV_SERVER_STOP_PROMPT = (
+    "You are operating within a Takopi worktree context.\n"
+    "\n"
+    "Goal: stop the dev server if it is still listening on port {port}.\n"
+    "\n"
+    "Rules:\n"
+    "- If nothing is listening on the port, do nothing.\n"
+    "- Prefer a graceful stop (repo stop command or SIGTERM).\n"
+    "- Report what you stopped or why it could not be stopped.\n"
+    "\n"
+    "Context: {context_line}\n"
+    "Worktree: {worktree}\n"
 )
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +181,58 @@ class PreviewConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewServerConfig:
+    host: str
+    start_port: int | None
+    start_instruction: str | None
+    stop_instruction: str | None
+
+    @classmethod
+    def from_config(
+        cls, config: object, *, config_path: Path
+    ) -> "PreviewServerConfig":
+        if isinstance(config, PreviewServerConfig):
+            return config
+        if not isinstance(config, dict):
+            raise ConfigError(
+                f"Invalid `preview.server` config in {config_path}; expected a table."
+            )
+
+        host = (
+            _optional_str_config(config, "host", config_path=config_path, prefix="preview.server")
+            or DEFAULT_SERVER_HOST
+        )
+        start_port = _optional_int_config(
+            config, "start_port", config_path=config_path, prefix="preview.server"
+        )
+        if start_port is not None:
+            _validate_port(start_port)
+        start_instruction = _optional_str_config(
+            config,
+            "start_instruction",
+            config_path=config_path,
+            prefix="preview.server",
+        )
+        if start_instruction is not None:
+            start_instruction = start_instruction.strip() or None
+        stop_instruction = _optional_str_config(
+            config,
+            "stop_instruction",
+            config_path=config_path,
+            prefix="preview.server",
+        )
+        if stop_instruction is not None:
+            stop_instruction = stop_instruction.strip() or None
+
+        return cls(
+            host=host,
+            start_port=start_port,
+            start_instruction=start_instruction,
+            stop_instruction=stop_instruction,
+        )
+
+
 @dataclass(slots=True)
 class PreviewSession:
     session_id: str
@@ -150,6 +248,12 @@ class PreviewSession:
 
     def touch(self, now: float | None = None) -> None:
         self.last_seen = now or time.time()
+
+
+@dataclass(frozen=True, slots=True)
+class PromptContext:
+    context_line: str | None
+    cwd: Path | None
 
 
 class PreviewManager:
@@ -434,6 +538,45 @@ class PreviewCommand:
                 repo_root=repo_root,
             )
             return CommandResult(text=_format_started(session))
+        if command in {"server", "start-server"}:
+            server_config = _load_server_config(ctx, context)
+            port, instruction = _parse_server_args(
+                ctx.args[1:], default_port=server_config.start_port
+            )
+            instruction = instruction or server_config.start_instruction
+            worktree_path, _repo_root = _require_worktree(cwd, action="preview server")
+            prompt = _build_start_prompt(
+                host=server_config.host,
+                port=port,
+                prompt_context=PromptContext(
+                    context_line=context_line, cwd=worktree_path
+                ),
+                instruction=instruction,
+            )
+            await ctx.executor.run_one(
+                RunRequest(prompt=prompt, context=_as_run_context(context))
+            )
+            return None
+        if command in {"kill-server", "stop-server"}:
+            server_config = _load_server_config(ctx, context)
+            port, instruction = _parse_server_args(
+                ctx.args[1:], default_port=server_config.start_port
+            )
+            instruction = instruction or server_config.stop_instruction
+            worktree_path, _repo_root = _require_worktree(
+                cwd, action="preview kill-server"
+            )
+            prompt = _build_stop_prompt(
+                port=port,
+                prompt_context=PromptContext(
+                    context_line=context_line, cwd=worktree_path
+                ),
+                instruction=instruction,
+            )
+            await ctx.executor.run_one(
+                RunRequest(prompt=prompt, context=_as_run_context(context))
+            )
+            return None
         if command == "list":
             sessions = await MANAGER.list_sessions(config=config)
             return CommandResult(text=_format_list(sessions))
@@ -469,6 +612,15 @@ def _coerce_chat_id(value: Any) -> int | None:
     return None
 
 
+def _as_run_context(context: object | None) -> RunContext | None:
+    if isinstance(context, RunContext):
+        return context
+    project = _context_project(context)
+    if project is None:
+        return None
+    return RunContext(project=project)
+
+
 def _load_config(ctx: CommandContext, context: object | None) -> PreviewConfig:
     base = dict(ctx.plugin_config or {})
     project_override: dict[str, Any] = {}
@@ -480,6 +632,40 @@ def _load_config(ctx: CommandContext, context: object | None) -> PreviewConfig:
 
     merged = _merge_preview_config(base, project_override)
     return PreviewConfig.from_config(merged, config_path=config_path)
+
+
+def _load_server_config(ctx: CommandContext, context: object | None) -> PreviewServerConfig:
+    base = dict(ctx.plugin_config or {})
+    config_path = ctx.config_path or HOME_CONFIG_PATH
+
+    server_base = base.get("server") if isinstance(base, dict) else None
+    if server_base is None:
+        server_base = {}
+    if not isinstance(server_base, dict):
+        raise ConfigError(
+            f"Invalid `preview.server` in {config_path}; expected a table."
+        )
+
+    server_override: dict[str, Any] = {}
+    if context is not None:
+        project = _context_project(context)
+        if project:
+            project_override = _project_override(base, project, config_path=config_path)
+            if project_override:
+                raw = project_override.get("server")
+                if raw is None:
+                    server_override = {}
+                elif not isinstance(raw, dict):
+                    raise ConfigError(
+                        f"Invalid `preview.projects.{project}.server` in {config_path}; "
+                        "expected a table."
+                    )
+                else:
+                    server_override = dict(raw)
+
+    merged = dict(server_base)
+    merged.update(server_override)
+    return PreviewServerConfig.from_config(merged, config_path=config_path)
 
 
 def _project_override(
@@ -527,7 +713,24 @@ def _optional_str(config: dict[str, Any], key: str, *, config_path: Path) -> str
     if not isinstance(value, str):
         raise ConfigError(
             f"Invalid `preview.{key}` in {config_path}; expected a string."
-        )
+    )
+    return value.strip()
+
+
+def _optional_str_config(
+    config: dict[str, Any],
+    key: str,
+    *,
+    config_path: Path,
+    prefix: str,
+) -> str | None:
+    if key not in config:
+        return None
+    value = config.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"Invalid `{prefix}.{key}` in {config_path}; expected a string.")
     return value.strip()
 
 
@@ -542,6 +745,25 @@ def _optional_int(config: dict[str, Any], key: str, *, config_path: Path) -> int
     if isinstance(value, str) and value.isdigit():
         return int(value)
     raise ConfigError(f"Invalid `preview.{key}` in {config_path}; expected an int.")
+
+
+def _optional_int_config(
+    config: dict[str, Any],
+    key: str,
+    *,
+    config_path: Path,
+    prefix: str,
+) -> int | None:
+    if key not in config:
+        return None
+    value = config.get(key)
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    raise ConfigError(f"Invalid `{prefix}.{key}` in {config_path}; expected an int.")
 
 
 def _optional_int_set(
@@ -586,21 +808,25 @@ def _validate_port(port: int) -> None:
         )
 
 
-def _require_worktree(cwd: Path | None) -> tuple[Path, Path]:
+def _require_worktree(
+    cwd: Path | None, *, action: str = "preview start"
+) -> tuple[Path, Path]:
     if cwd is None:
-        raise ConfigError("preview start requires a worktree; specify a project/branch.")
+        raise ConfigError(
+            f"{action} requires a worktree; specify a project/branch."
+        )
     top = git_stdout(
         ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
     )
     if not top:
-        raise ConfigError("preview start requires a git worktree.")
+        raise ConfigError(f"{action} requires a git worktree.")
     worktree_path = Path(top).resolve(strict=False)
     repo_root = resolve_main_worktree_root(worktree_path)
     if repo_root is None:
-        raise ConfigError("preview start requires a git worktree.")
+        raise ConfigError(f"{action} requires a git worktree.")
     repo_root = repo_root.resolve(strict=False)
     if worktree_path == repo_root:
-        raise ConfigError("preview start requires a worktree (not the main repo).")
+        raise ConfigError(f"{action} requires a worktree (not the main repo).")
     return worktree_path, repo_root
 
 
@@ -634,8 +860,34 @@ def _parse_start_args(
     return parsed
 
 
+def _parse_server_args(
+    args: tuple[str, ...],
+    *,
+    default_port: int | None,
+) -> tuple[int, str | None]:
+    if not args:
+        if default_port is None:
+            raise ConfigError(_usage_preview_server())
+        return default_port, None
+    parsed = _parse_port(args[0])
+    if parsed is not None:
+        instruction = " ".join(args[1:]).strip() or None
+        return parsed, instruction
+    if default_port is None:
+        raise ConfigError(_usage_preview_server())
+    instruction = " ".join(args).strip() or None
+    return default_port, instruction
+
+
 def _usage_preview_start() -> str:
     return "usage: `/preview start [port]`"
+
+
+def _usage_preview_server() -> str:
+    return (
+        "usage: `/preview server [port] [instruction...]` "
+        "or `/preview kill-server [port] [instruction...]`"
+    )
 
 
 def _normalize_path_prefix(prefix: str) -> str:
@@ -666,6 +918,50 @@ def _parse_local_target_port(
     if parsed.port is None:
         return None
     return parsed.port
+
+
+def _format_prompt_context(prompt_context: PromptContext) -> str:
+    return prompt_context.context_line or "none"
+
+
+def _format_prompt_worktree(prompt_context: PromptContext) -> str:
+    if prompt_context.cwd is not None:
+        return str(prompt_context.cwd)
+    return "unknown"
+
+
+def _build_start_prompt(
+    *,
+    host: str,
+    port: int,
+    prompt_context: PromptContext,
+    instruction: str | None,
+) -> str:
+    prompt = DEV_SERVER_START_PROMPT.format(
+        host=host,
+        port=port,
+        context_line=_format_prompt_context(prompt_context),
+        worktree=_format_prompt_worktree(prompt_context),
+    )
+    if instruction:
+        prompt = f"{prompt}\nUser instruction: {instruction}\n"
+    return prompt
+
+
+def _build_stop_prompt(
+    *,
+    port: int,
+    prompt_context: PromptContext,
+    instruction: str | None,
+) -> str:
+    prompt = DEV_SERVER_STOP_PROMPT.format(
+        port=port,
+        context_line=_format_prompt_context(prompt_context),
+        worktree=_format_prompt_worktree(prompt_context),
+    )
+    if instruction:
+        prompt = f"{prompt}\nUser instruction: {instruction}\n"
+    return prompt
 
 
 def _tailscale_https_port(config: PreviewConfig, port: int) -> int:
@@ -1091,6 +1387,8 @@ def _help_text() -> str:
     return (
         "preview commands:\n"
         "/preview start [port]\n"
+        "/preview server [port] [instruction...]\n"
+        "/preview kill-server [port] [instruction...]\n"
         "/preview list\n"
         "/preview stop [id|port]\n"
         "/preview killall\n"

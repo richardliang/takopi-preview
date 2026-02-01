@@ -21,7 +21,8 @@ enabled = ["takopi-transport-slack", "takopi-preview"]
 provider = "tailscale"
 ```
 
-4. start your dev server, then in chat pick a worktree context and start a preview:
+4. start your dev server (or use `/preview server`), then in chat pick a worktree
+   context and start a preview:
 
 ```
 /myapp @feat/login
@@ -37,6 +38,8 @@ Open the returned URL, then stop when done:
 ## commands
 
 - `/preview start [port]`: start a preview for the current context
+- `/preview server [port] [instruction...]`: ask the engine to start a dev server
+- `/preview kill-server [port] [instruction...]`: ask the engine to stop a dev server
 - `/preview list`: show active previews (url, port, uptime, context)
 - `/preview stop [id|port]`: stop a preview (defaults to current context)
 - `/preview killall`: stop all previews (restricted by allowlist)
@@ -54,9 +57,19 @@ local_host = "127.0.0.1"
 tailscale_bin = "tailscale"
 start_port = 5173
 
+[plugins.preview.server]
+host = "localhost"
+start_port = 5173
+start_instruction = "start the web dev server only"
+stop_instruction = "stop the web dev server on port 5173"
+
 [plugins.preview.projects.myapp]
 path_prefix = "/preview"
 start_port = 3000
+
+[plugins.preview.projects.myapp.server]
+start_port = 3000
+start_instruction = "start the web dev server only"
 ```
 
 Notes:
@@ -67,9 +80,14 @@ Notes:
 
 ## dev server lifecycle
 
-takopi-preview no longer starts or stops dev servers. Run your dev server
-manually, then use `/preview start` to expose it and `/preview stop` to disable
-the Tailscale Serve entry.
+takopi-preview does not auto-manage dev servers for you, but it does ship
+helpers that forward a standardized prompt to the engine:
+
+- `/preview server [port] [instruction...]` (start)
+- `/preview kill-server [port] [instruction...]` (stop)
+
+You can still start servers manually, then use `/preview start` to expose them
+and `/preview stop` to disable the Tailscale Serve entry.
 
 ## common setups
 

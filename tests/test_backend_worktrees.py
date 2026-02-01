@@ -240,6 +240,32 @@ def test_rejects_cloudflared_options() -> None:
         )
 
 
+def test_preview_server_config_defaults() -> None:
+    config = backend.PreviewServerConfig.from_config(
+        {},
+        config_path=Path("takopi.toml"),
+    )
+    assert config.host == "localhost"
+    assert config.start_port is None
+
+
+def test_preview_server_config_rejects_invalid_port() -> None:
+    with pytest.raises(ConfigError):
+        backend.PreviewServerConfig.from_config(
+            {"start_port": 80},
+            config_path=Path("takopi.toml"),
+        )
+
+
+def test_preview_server_config_trims_instructions() -> None:
+    config = backend.PreviewServerConfig.from_config(
+        {"start_instruction": "  start  ", "stop_instruction": "   "},
+        config_path=Path("takopi.toml"),
+    )
+    assert config.start_instruction == "start"
+    assert config.stop_instruction is None
+
+
 def test_allows_preview_port_https() -> None:
     config = backend.PreviewConfig.from_config(
         {"tailscale_https_port": 0},
