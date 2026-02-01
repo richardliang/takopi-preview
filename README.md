@@ -73,8 +73,8 @@ Notes:
 `/preview start` asks Takopi to ensure the dev server is running for the current
 worktree before enabling Tailscale Serve.
 
-- if the target port is already listening, Takopi confirms it is the right
-  server and leaves it running.
+- if the target port is already listening, Takopi assumes it is the right
+  server and leaves it running (no diagnostics).
 - if the port is closed, Takopi finds the right dev command (README, AGENTS,
   package scripts) and starts it, preferring pnpm > bun > npm > yarn or
   uv > poetry > pip.
