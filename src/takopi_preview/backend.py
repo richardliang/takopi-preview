@@ -51,8 +51,8 @@ DEV_SERVER_START_PROMPT = (
     "correct dev server and leave it running.\n"
     "- If nothing is listening, find the right dev command from README, "
     "AGENTS, or package scripts and start it.\n"
-    "- Start the dev server in the foreground and keep it running; do not "
-    "detach with nohup/setsid/disown.\n"
+    "- Start the dev server in a detached/background session so it keeps running "
+    "after this command finishes. Use nohup/setsid/disown and redirect logs.\n"
     "- Do not use `timeout` for the server process.\n"
     "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
     "uv > poetry > pip for Python).\n"
@@ -856,6 +856,15 @@ async def _wait_for_port_open(
         await asyncio.sleep(interval_seconds)
 
 
+def _log_background_task_exception(task: asyncio.Task[object]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception("preview.dev_server_start_failed")
+
+
 async def _ensure_dev_server_ready(
     *,
     ctx: CommandContext,
@@ -880,7 +889,34 @@ async def _ensure_dev_server_ready(
         instruction=instruction,
     )
     request = RunRequest(prompt=prompt, context=_as_run_context(context))
-    await ctx.executor.run_one(request)
+    background_runner = getattr(ctx.executor, "run_background", None)
+    run_task: asyncio.Task[object] | None = None
+    launched_in_background = False
+    if callable(background_runner):
+        launched_in_background = True
+        try:
+            result = background_runner(request)
+        except Exception:
+            logger.exception("preview.dev_server_start_failed")
+            launched_in_background = False
+        else:
+            if asyncio.iscoroutine(result):
+                async def _unwrap_background() -> None:
+                    try:
+                        inner = await result
+                    except Exception:
+                        logger.exception("preview.dev_server_start_failed")
+                        return
+                    if isinstance(inner, asyncio.Task):
+                        inner.add_done_callback(_log_background_task_exception)
+
+                asyncio.create_task(_unwrap_background())
+            elif isinstance(result, asyncio.Task):
+                run_task = result
+                run_task.add_done_callback(_log_background_task_exception)
+    if not launched_in_background:
+        run_task = asyncio.create_task(ctx.executor.run_one(request))
+        run_task.add_done_callback(_log_background_task_exception)
     ready = await _wait_for_port_open(
         hosts,
         port,
@@ -888,6 +924,8 @@ async def _ensure_dev_server_ready(
         interval_seconds=DEV_SERVER_POLL_INTERVAL_SECONDS,
     )
     if not ready:
+        if run_task is not None and not launched_in_background and not run_task.done():
+            run_task.cancel()
         host_label = ", ".join(hosts)
         raise ConfigError(
             f"Dev server did not start on {host_label}:{port} within "

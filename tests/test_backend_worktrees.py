@@ -346,7 +346,7 @@ def test_parse_start_args_uses_default_instruction_with_port() -> None:
     assert instruction == "use pnpm dev"
 
 
-def test_ensure_dev_server_ready_waits_for_run_one(
+def test_ensure_dev_server_ready_does_not_block_on_background(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def runner() -> None:
@@ -355,12 +355,15 @@ def test_ensure_dev_server_ready_waits_for_run_one(
         done = asyncio.Event()
 
         class DummyExecutor:
-            async def run_one(self, _request) -> None:
-                started.set()
-                try:
-                    await finish.wait()
-                finally:
-                    done.set()
+            def run_background(self, _request) -> asyncio.Task[None]:
+                async def _run() -> None:
+                    started.set()
+                    try:
+                        await finish.wait()
+                    finally:
+                        done.set()
+
+                return asyncio.create_task(_run())
 
         class DummyContext:
             executor = DummyExecutor()
@@ -371,7 +374,7 @@ def test_ensure_dev_server_ready_waits_for_run_one(
         monkeypatch.setattr(backend, "_wait_for_port_open", fake_wait_for_port_open)
         config = backend.PreviewConfig.from_config({}, config_path=Path("takopi.toml"))
 
-        task = asyncio.create_task(
+        await asyncio.wait_for(
             backend._ensure_dev_server_ready(
                 ctx=DummyContext(),
                 config=config,
@@ -381,13 +384,13 @@ def test_ensure_dev_server_ready_waits_for_run_one(
                 context_line=None,
                 cwd=None,
                 worktree_path=None,
-            )
+            ),
+            timeout=1.0,
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
-        assert not task.done()
+        assert not done.is_set()
         finish.set()
         await asyncio.wait_for(done.wait(), timeout=1.0)
-        await asyncio.wait_for(task, timeout=1.0)
 
     asyncio.run(runner())
 
@@ -517,13 +520,9 @@ def test_start_clears_tailscale_conflict() -> None:
 
 
 def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = {"run_one": 0, "run_background": 0}
+    calls = {"run_one": 0}
 
     class DummyExecutor:
-        def run_background(self, _request) -> None:
-            calls["run_background"] += 1
-            return None
-
         async def run_one(self, _request) -> None:
             calls["run_one"] += 1
             await asyncio.sleep(0)
@@ -566,4 +565,3 @@ def test_ensure_dev_server_ready_uses_run_one(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert calls["run_one"] == 1
-    assert calls["run_background"] == 0
