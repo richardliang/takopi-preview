@@ -40,34 +40,17 @@ LOCAL_PROXY_PORT_RE = re.compile(
 DEV_SERVER_START_PROMPT = (
     "You are operating within a Takopi worktree context.\n"
     "\n"
-    "Goal: ensure the correct dev server is running for preview.\n"
+    "Goal: ensure the dev server is running for preview.\n"
     "\n"
     "Target:\n"
     "- host: {host}\n"
     "- port: {port}\n"
     "\n"
     "Rules:\n"
-    "- If something is already listening on the target port, assume it is the "
-    "correct dev server and leave it running. Do not run diagnostics.\n"
-    "- If nothing is listening, find the right dev command from README, "
-    "AGENTS, or package scripts and start it.\n"
-    "- If the user instruction includes a specific command, run it exactly; do "
-    "not change host/port or add extra steps.\n"
-    "- Start the dev server in a detached/background session so it keeps running "
-    "after this command finishes. Use nohup/setsid/disown and redirect logs.\n"
-    "- Do not use `timeout` for the server process.\n"
-    "- Do not run diagnostics (no curl/ss/lsof/ps) or inspect source files unless "
-    "the start command fails.\n"
-    "- Prefer the repo's primary toolchain (pnpm > bun > npm > yarn; "
-    "uv > poetry > pip for Python).\n"
-    "- Install dependencies only if required to start the dev server.\n"
-    "- Bind to the target host and port; avoid public binds unless required.\n"
-    "\n"
-    "Edge cases:\n"
-    "- Monorepo with multiple apps: pick the app for this context and say which.\n"
-    "- If the default port differs, override it to {port} or explain why you "
-    "cannot.\n"
-    "- If startup fails, report the error and the next step.\n"
+    "- If the target port is already listening, leave it running.\n"
+    "- Otherwise start the correct dev command (README/AGENTS/package scripts).\n"
+    "- If the user instruction includes a specific command, run it exactly.\n"
+    "- If startup fails, report the error and next step.\n"
     "\n"
     "Context: {context_line}\n"
     "Worktree: {worktree}\n"
@@ -522,10 +505,10 @@ class PreviewCommand:
                 worktree_path=worktree_path,
                 repo_root=repo_root,
             )
-            return CommandResult(text=_format_started(session))
+            return CommandResult(text=_format_started(session, config=config))
         if command == "list":
             sessions = await MANAGER.list_sessions(config=config)
-            return CommandResult(text=_format_list(sessions))
+            return CommandResult(text=_format_list(sessions, config=config))
         if command in {"stop", "off"}:
             session = await MANAGER.find_session(
                 config=config,
@@ -542,7 +525,7 @@ class PreviewCommand:
                 run_context=_session_context(session),
             )
             session = await MANAGER.stop(config=config, session=session)
-            return CommandResult(text=_format_stopped(session))
+            return CommandResult(text=_format_stopped(session, config=config))
         if command in {"killall", "stopall"}:
             sessions = await MANAGER.stop_all(config=config)
             for session in sessions:
@@ -555,7 +538,7 @@ class PreviewCommand:
                     worktree_path=session.worktree_path,
                     run_context=_session_context(session),
                 )
-            return CommandResult(text=_format_killall(sessions))
+            return CommandResult(text=_format_killall(sessions, config=config))
         if command in {"help", "--help", "-h"}:
             return CommandResult(text=_help_text())
 
@@ -1023,10 +1006,20 @@ def _parse_local_target_port(
     return parsed.port
 
 
+def _tailscale_prefixed_port(port: int) -> int:
+    prefixed = int(f"1{port}")
+    if not (SAFE_PORT_MIN <= prefixed <= SAFE_PORT_MAX):
+        raise ConfigError(
+            "Prefixed tailscale port is out of range; "
+            "set preview.tailscale_https_port to a fixed value instead."
+        )
+    return prefixed
+
+
 def _tailscale_https_port(config: PreviewConfig, port: int) -> int:
     if config.tailscale_https_port is not None:
         if config.tailscale_https_port == 0:
-            return port
+            return _tailscale_prefixed_port(port)
         return config.tailscale_https_port
     return 443
 
@@ -1389,33 +1382,47 @@ def _find_pruned_sessions(sessions: list[PreviewSession]) -> list[PreviewSession
     return pruned
 
 
-def _format_started(session: PreviewSession) -> str:
+def _format_port_label(config: PreviewConfig, port: int) -> str:
+    if config.tailscale_https_port is None:
+        return str(port)
+    https_port = _tailscale_https_port(config, port)
+    if https_port == port:
+        return str(port)
+    return f"{https_port} (local {port})"
+
+
+def _format_started(session: PreviewSession, *, config: PreviewConfig) -> str:
     url = session.url or "(url unavailable)"
     context = f"\n{session.context_line}" if session.context_line else ""
     label = "Tailscale preview enabled"
+    port_label = _format_port_label(config, session.port)
     return (
-        f"{label} on port {session.port}.\n"
+        f"{label} on port {port_label}.\n"
         f"Open: {url}{context}\n"
         f"ID: {session.session_id}"
     )
 
 
-def _format_stopped(session: PreviewSession) -> str:
+def _format_stopped(session: PreviewSession, *, config: PreviewConfig) -> str:
     url = session.url or "(url unavailable)"
-    return f"Preview stopped on port {session.port}.\nURL: {url}"
+    port_label = _format_port_label(config, session.port)
+    return f"Preview stopped on port {port_label}.\nURL: {url}"
 
 
-def _format_killall(sessions: list[PreviewSession]) -> str:
+def _format_killall(
+    sessions: list[PreviewSession], *, config: PreviewConfig
+) -> str:
     if not sessions:
         return "No active previews."
     lines = ["Stopped previews:"]
     for session in sorted(sessions, key=lambda item: item.port):
         url = session.url or "(url unavailable)"
-        lines.append(f"- port {session.port} | {url}")
+        port_label = _format_port_label(config, session.port)
+        lines.append(f"- port {port_label} | {url}")
     return "\n".join(lines)
 
 
-def _format_list(sessions: list[PreviewSession]) -> str:
+def _format_list(sessions: list[PreviewSession], *, config: PreviewConfig) -> str:
     if not sessions:
         return "No active previews."
     lines = ["Active previews:"]
@@ -1423,8 +1430,9 @@ def _format_list(sessions: list[PreviewSession]) -> str:
         age = _format_age(session.created_at)
         url = session.url or "(url unavailable)"
         context = session.context_line or "(no context)"
+        port_label = _format_port_label(config, session.port)
         lines.append(
-            f"- {session.session_id} | port {session.port} | {url} | {age} | {context}"
+            f"- {session.session_id} | port {port_label} | {url} | {age} | {context}"
         )
     return "\n".join(lines)
 
