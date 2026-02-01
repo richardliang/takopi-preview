@@ -450,9 +450,11 @@ class PreviewCommand:
         if not ctx.args:
             return CommandResult(text=_help_text())
 
+        ambient_context = getattr(ctx.executor, "default_context", None)
         resolved = ctx.runtime.resolve_message(
             text=ctx.text,
             reply_text=ctx.reply_text,
+            ambient_context=ambient_context,
             chat_id=_coerce_chat_id(ctx.message.channel_id),
         )
         context = resolved.context
